@@ -26,7 +26,7 @@ if QT_API is None:
     pyside_found = False
     try:
         import PySide
-        if not check_version(PySide.__version__, '1.0.3'):
+        if not check_version(PySide.__version__, '1.1.1'):
             # old PySide, fallback on PyQt
             raise ImportError
         # we can't import an incomplete pyside and pyqt4
