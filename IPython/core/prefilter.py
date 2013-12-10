@@ -24,16 +24,13 @@ Authors:
 # Imports
 #-----------------------------------------------------------------------------
 
+from keyword import iskeyword
 import re
 
 from IPython.core.autocall import IPyAutocall
 from IPython.config.configurable import Configurable
 from IPython.core.inputsplitter import (
-    ESC_SHELL,
-    ESC_SH_CAP,
-    ESC_HELP,
     ESC_MAGIC,
-    ESC_MAGIC2,
     ESC_QUOTE,
     ESC_QUOTE2,
     ESC_PAREN,
@@ -84,7 +81,8 @@ def is_shadowed(identifier, ip):
     # This is much safer than calling ofind, which can change state
     return (identifier in ip.user_ns \
             or identifier in ip.user_global_ns \
-            or identifier in ip.ns_table['builtin'])
+            or identifier in ip.ns_table['builtin']\
+            or iskeyword(identifier))
 
 
 #-----------------------------------------------------------------------------
@@ -134,8 +132,8 @@ class PrefilterManager(Configurable):
     multi_line_specials = CBool(True, config=True)
     shell = Instance('IPython.core.interactiveshell.InteractiveShellABC')
 
-    def __init__(self, shell=None, config=None):
-        super(PrefilterManager, self).__init__(shell=shell, config=config)
+    def __init__(self, shell=None, **kwargs):
+        super(PrefilterManager, self).__init__(shell=shell, **kwargs)
         self.shell = shell
         self.init_transformers()
         self.init_handlers()
@@ -150,7 +148,7 @@ class PrefilterManager(Configurable):
         self._transformers = []
         for transformer_cls in _default_transformers:
             transformer_cls(
-                shell=self.shell, prefilter_manager=self, config=self.config
+                shell=self.shell, prefilter_manager=self, parent=self
             )
 
     def sort_transformers(self):
@@ -186,7 +184,7 @@ class PrefilterManager(Configurable):
         self._checkers = []
         for checker in _default_checkers:
             checker(
-                shell=self.shell, prefilter_manager=self, config=self.config
+                shell=self.shell, prefilter_manager=self, parent=self
             )
 
     def sort_checkers(self):
@@ -223,7 +221,7 @@ class PrefilterManager(Configurable):
         self._esc_handlers = {}
         for handler in _default_handlers:
             handler(
-                shell=self.shell, prefilter_manager=self, config=self.config
+                shell=self.shell, prefilter_manager=self, parent=self
             )
 
     @property
@@ -368,9 +366,9 @@ class PrefilterTransformer(Configurable):
     prefilter_manager = Instance('IPython.core.prefilter.PrefilterManager')
     enabled = Bool(True, config=True)
 
-    def __init__(self, shell=None, prefilter_manager=None, config=None):
+    def __init__(self, shell=None, prefilter_manager=None, **kwargs):
         super(PrefilterTransformer, self).__init__(
-            shell=shell, prefilter_manager=prefilter_manager, config=config
+            shell=shell, prefilter_manager=prefilter_manager, **kwargs
         )
         self.prefilter_manager.register_transformer(self)
 
@@ -396,9 +394,9 @@ class PrefilterChecker(Configurable):
     prefilter_manager = Instance('IPython.core.prefilter.PrefilterManager')
     enabled = Bool(True, config=True)
 
-    def __init__(self, shell=None, prefilter_manager=None, config=None):
+    def __init__(self, shell=None, prefilter_manager=None, **kwargs):
         super(PrefilterChecker, self).__init__(
-            shell=shell, prefilter_manager=prefilter_manager, config=config
+            shell=shell, prefilter_manager=prefilter_manager, **kwargs
         )
         self.prefilter_manager.register_checker(self)
 
@@ -492,22 +490,6 @@ class AutoMagicChecker(PrefilterChecker):
         return self.prefilter_manager.get_handler_by_name('magic')
 
 
-class AliasChecker(PrefilterChecker):
-
-    priority = Integer(800, config=True)
-
-    def check(self, line_info):
-        "Check if the initital identifier on the line is an alias."
-        # Note: aliases can not contain '.'
-        head = line_info.ifun.split('.',1)[0]
-        if line_info.ifun not in self.shell.alias_manager \
-               or head not in self.shell.alias_manager \
-               or is_shadowed(head, self.shell):
-            return None
-
-        return self.prefilter_manager.get_handler_by_name('alias')
-
-
 class PythonOpsChecker(PrefilterChecker):
 
     priority = Integer(900, config=True)
@@ -561,9 +543,9 @@ class PrefilterHandler(Configurable):
     shell = Instance('IPython.core.interactiveshell.InteractiveShellABC')
     prefilter_manager = Instance('IPython.core.prefilter.PrefilterManager')
 
-    def __init__(self, shell=None, prefilter_manager=None, config=None):
+    def __init__(self, shell=None, prefilter_manager=None, **kwargs):
         super(PrefilterHandler, self).__init__(
-            shell=shell, prefilter_manager=prefilter_manager, config=config
+            shell=shell, prefilter_manager=prefilter_manager, **kwargs
         )
         self.prefilter_manager.register_handler(
             self.handler_name,
@@ -593,20 +575,6 @@ class PrefilterHandler(Configurable):
 
     def __str__(self):
         return "<%s(name=%s)>" % (self.__class__.__name__, self.handler_name)
-
-
-class AliasHandler(PrefilterHandler):
-
-    handler_name = Unicode('alias')
-
-    def handle(self, line_info):
-        """Handle alias input lines. """
-        transformed = self.shell.alias_manager.expand_aliases(line_info.ifun,line_info.the_rest)
-        # pre is needed, because it carries the leading whitespace.  Otherwise
-        # aliases won't work in indented sections.
-        line_out = '%sget_ipython().system(%r)' % (line_info.pre_whitespace, transformed)
-
-        return line_out
 
 
 class MacroHandler(PrefilterHandler):
@@ -734,14 +702,12 @@ _default_checkers = [
     IPyAutocallChecker,
     AssignmentChecker,
     AutoMagicChecker,
-    AliasChecker,
     PythonOpsChecker,
     AutocallChecker
 ]
 
 _default_handlers = [
     PrefilterHandler,
-    AliasHandler,
     MacroHandler,
     MagicHandler,
     AutoHandler,

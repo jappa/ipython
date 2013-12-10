@@ -47,9 +47,10 @@ def process_handler(cmd, callback, stderr=subprocess.PIPE):
 
     Parameters
     ----------
-    cmd : str
-      A string to be executed with the underlying system shell (by calling
-    :func:`Popen` with ``shell=True``.
+    cmd : str or list
+      A command to be executed by the system, using :class:`subprocess.Popen`.
+      If a string is passed, it will be run in the system shell. If a list is
+      passed, it will be used directly as arguments.
 
     callback : callable
       A one-argument function that will be called with the Popen object.
@@ -68,7 +69,7 @@ def process_handler(cmd, callback, stderr=subprocess.PIPE):
     sys.stderr.flush()
     # On win32, close_fds can't be true when using pipes for stdin/out/err
     close_fds = sys.platform != 'win32'
-    p = subprocess.Popen(cmd, shell=True,
+    p = subprocess.Popen(cmd, shell=isinstance(cmd, py3compat.string_types),
                          stdin=subprocess.PIPE,
                          stdout=subprocess.PIPE,
                          stderr=stderr,
@@ -103,20 +104,21 @@ def process_handler(cmd, callback, stderr=subprocess.PIPE):
 
 
 def getoutput(cmd):
-    """Return standard output of executing cmd in a shell.
-
-    Accepts the same arguments as os.system().
+    """Run a command and return its stdout/stderr as a string.
 
     Parameters
     ----------
-    cmd : str
+    cmd : str or list
       A command to be executed in the system shell.
 
     Returns
     -------
-    stdout : str
+    output : str
+      A string containing the combination of stdout and stderr from the
+    subprocess, in whatever order the subprocess originally wrote to its
+    file descriptors (so the order of the information in this string is the
+    correct order as would be seen if running the command in a terminal).
     """
-
     out = process_handler(cmd, lambda p: p.communicate()[0], subprocess.STDOUT)
     if out is None:
         return ''
@@ -130,7 +132,7 @@ def getoutputerror(cmd):
 
     Parameters
     ----------
-    cmd : str
+    cmd : str or list
       A command to be executed in the system shell.
 
     Returns
@@ -138,13 +140,31 @@ def getoutputerror(cmd):
     stdout : str
     stderr : str
     """
+    return get_output_error_code(cmd)[:2]
 
-    out_err = process_handler(cmd, lambda p: p.communicate())
+def get_output_error_code(cmd):
+    """Return (standard output, standard error, return code) of executing cmd
+    in a shell.
+
+    Accepts the same arguments as os.system().
+
+    Parameters
+    ----------
+    cmd : str or list
+      A command to be executed in the system shell.
+
+    Returns
+    -------
+    stdout : str
+    stderr : str
+    returncode: int
+    """
+
+    out_err, p = process_handler(cmd, lambda p: (p.communicate(), p))
     if out_err is None:
-        return '', ''
+        return '', '', p.returncode
     out, err = out_err
-    return py3compat.bytes_to_str(out), py3compat.bytes_to_str(err)
-
+    return py3compat.bytes_to_str(out), py3compat.bytes_to_str(err), p.returncode
 
 def arg_split(s, posix=False, strict=True):
     """Split a command line's arguments in a shell-like manner.

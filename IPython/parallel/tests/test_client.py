@@ -30,7 +30,7 @@ from IPython.parallel import error
 from IPython.parallel import AsyncResult, AsyncHubResult
 from IPython.parallel import LoadBalancedView, DirectView
 
-from clienttest import ClusterTestCase, segfault, wait, add_engines
+from .clienttest import ClusterTestCase, segfault, wait, add_engines
 
 def setup():
     add_engines(4, total=True)
@@ -95,7 +95,7 @@ class TestClient(ClusterTestCase):
         
         def double(x):
             return x*2
-        seq = range(100)
+        seq = list(range(100))
         ref = [ double(x) for x in seq ]
         
         # add some engines, which should be used
@@ -152,10 +152,10 @@ class TestClient(ClusterTestCase):
         ar = c[t].apply_async(wait, 1)
         # give the monitor time to notice the message
         time.sleep(.25)
-        ahr = self.client.get_result(ar.msg_ids)
+        ahr = self.client.get_result(ar.msg_ids[0])
         self.assertTrue(isinstance(ahr, AsyncHubResult))
         self.assertEqual(ahr.get(), ar.get())
-        ar2 = self.client.get_result(ar.msg_ids)
+        ar2 = self.client.get_result(ar.msg_ids[0])
         self.assertFalse(isinstance(ar2, AsyncHubResult))
         c.close()
     
@@ -171,10 +171,10 @@ class TestClient(ClusterTestCase):
         ar = c[t].execute("import time; time.sleep(1)", silent=False)
         # give the monitor time to notice the message
         time.sleep(.25)
-        ahr = self.client.get_result(ar.msg_ids)
+        ahr = self.client.get_result(ar.msg_ids[0])
         self.assertTrue(isinstance(ahr, AsyncHubResult))
         self.assertEqual(ahr.get().pyout, ar.get().pyout)
-        ar2 = self.client.get_result(ar.msg_ids)
+        ar2 = self.client.get_result(ar.msg_ids[0])
         self.assertFalse(isinstance(ar2, AsyncHubResult))
         c.close()
     
@@ -301,8 +301,12 @@ class TestClient(ClusterTestCase):
         self.assertEqual(self.client.hub_history()[-1:],ar.msg_ids)
     
     def _wait_for_idle(self):
-        """wait for an engine to become idle, according to the Hub"""
+        """wait for the cluster to become idle, according to the everyone."""
         rc = self.client
+        
+        # step 0. wait for local results
+        # this should be sufficient 99% of the time.
+        rc.wait(timeout=5)
         
         # step 1. wait for all requests to be noticed
         # timeout 5s, polling every 100ms
@@ -321,7 +325,7 @@ class TestClient(ClusterTestCase):
         # timeout 5s, polling every 100ms
         qs = rc.queue_status()
         for i in range(50):
-            if qs['unassigned'] or any(qs[eid]['tasks'] for eid in rc.ids):
+            if qs['unassigned'] or any(qs[eid]['tasks'] + qs[eid]['queue'] for eid in qs if eid != 'unassigned'):
                 time.sleep(0.1)
                 qs = rc.queue_status()
             else:
@@ -331,6 +335,7 @@ class TestClient(ClusterTestCase):
         self.assertEqual(qs['unassigned'], 0)
         for eid in rc.ids:
             self.assertEqual(qs[eid]['tasks'], 0)
+            self.assertEqual(qs[eid]['queue'], 0)
     
     
     def test_resubmit(self):

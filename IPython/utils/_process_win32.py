@@ -19,7 +19,6 @@ from __future__ import print_function
 import os
 import sys
 import ctypes
-import msvcrt
 
 from ctypes import c_int, POINTER
 from ctypes.wintypes import LPCWSTR, HLOCAL
@@ -45,8 +44,8 @@ class AvoidUNCPath(object):
     change and None otherwise, so that users can apply the necessary adjustment
     to their system calls in the event of a change.
 
-    Example
-    -------
+    Examples
+    --------
     ::
         cmd = 'dir'
         with AvoidUNCPath() as path:
@@ -55,7 +54,7 @@ class AvoidUNCPath(object):
             os.system(cmd)
     """
     def __enter__(self):
-        self.path = os.getcwdu()
+        self.path = py3compat.getcwd()
         self.is_unc_path = self.path.startswith(r"\\")
         if self.is_unc_path:
             # change to c drive (as cmd.exe cannot handle UNC addresses)
@@ -83,7 +82,7 @@ def _find_cmd(cmd):
         path = None
         for ext in extensions:
             try:
-                path = SearchPath(PATH, cmd + ext)[0]
+                path = SearchPath(PATH, cmd, ext)[0]
             except:
                 pass
         if path is None:
@@ -113,7 +112,7 @@ def system(cmd):
 
     Parameters
     ----------
-    cmd : str
+    cmd : str or list
       A command to be executed in the system shell.
 
     Returns
@@ -139,7 +138,7 @@ def getoutput(cmd):
 
     Parameters
     ----------
-    cmd : str
+    cmd : str or list
       A command to be executed in the system shell.
 
     Returns

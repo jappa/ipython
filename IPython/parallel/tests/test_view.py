@@ -16,25 +16,23 @@ Authors:
 # Imports
 #-------------------------------------------------------------------------------
 
+import base64
 import sys
 import platform
 import time
 from collections import namedtuple
 from tempfile import mktemp
-from StringIO import StringIO
 
 import zmq
-from nose import SkipTest
 from nose.plugins.attrib import attr
 
 from IPython.testing import decorators as dec
-from IPython.testing.ipunittest import ParametricTestCase
 from IPython.utils.io import capture_output
+from IPython.utils.py3compat import unicode_type
 
 from IPython import parallel  as pmod
 from IPython.parallel import error
 from IPython.parallel import AsyncResult, AsyncHubResult, AsyncMapResult
-from IPython.parallel import DirectView
 from IPython.parallel.util import interactive
 
 from IPython.parallel.tests import add_engines
@@ -46,7 +44,7 @@ def setup():
 
 point = namedtuple("point", "x y")
 
-class TestView(ClusterTestCase, ParametricTestCase):
+class TestView(ClusterTestCase):
     
     def setUp(self):
         # On Win XP, wait for resource cleanup, else parallel test group fails
@@ -71,7 +69,7 @@ class TestView(ClusterTestCase, ParametricTestCase):
     
     def test_push_pull(self):
         """test pushing and pulling"""
-        data = dict(a=10, b=1.05, c=range(10), d={'e':(1,2),'f':'hi'})
+        data = dict(a=10, b=1.05, c=list(range(10)), d={'e':(1,2),'f':'hi'})
         t = self.client.ids[-1]
         v = self.client[t]
         push = v.push
@@ -156,10 +154,10 @@ class TestView(ClusterTestCase, ParametricTestCase):
         ar = v.apply_async(wait, 1)
         # give the monitor time to notice the message
         time.sleep(.25)
-        ahr = v2.get_result(ar.msg_ids)
+        ahr = v2.get_result(ar.msg_ids[0])
         self.assertTrue(isinstance(ahr, AsyncHubResult))
         self.assertEqual(ahr.get(), ar.get())
-        ar2 = v2.get_result(ar.msg_ids)
+        ar2 = v2.get_result(ar.msg_ids[0])
         self.assertFalse(isinstance(ar2, AsyncHubResult))
         c.spin()
         c.close()
@@ -232,7 +230,7 @@ class TestView(ClusterTestCase, ParametricTestCase):
 
     def test_scatter_gather(self):
         view = self.client[:]
-        seq1 = range(16)
+        seq1 = list(range(16))
         view.scatter('a', seq1)
         seq2 = view.gather('a', block=True)
         self.assertEqual(seq2, seq1)
@@ -241,7 +239,7 @@ class TestView(ClusterTestCase, ParametricTestCase):
     @skip_without('numpy')
     def test_scatter_gather_numpy(self):
         import numpy
-        from numpy.testing.utils import assert_array_equal, assert_array_almost_equal
+        from numpy.testing.utils import assert_array_equal
         view = self.client[:]
         a = numpy.arange(64)
         view.scatter('a', a, block=True)
@@ -251,7 +249,7 @@ class TestView(ClusterTestCase, ParametricTestCase):
     def test_scatter_gather_lazy(self):
         """scatter/gather with targets='all'"""
         view = self.client.direct_view(targets='all')
-        x = range(64)
+        x = list(range(64))
         view.scatter('x', x)
         gathered = view.gather('x', block=True)
         self.assertEqual(gathered, x)
@@ -279,7 +277,7 @@ class TestView(ClusterTestCase, ParametricTestCase):
     def test_apply_numpy(self):
         """view.apply(f, ndarray)"""
         import numpy
-        from numpy.testing.utils import assert_array_equal, assert_array_almost_equal
+        from numpy.testing.utils import assert_array_equal
         
         A = numpy.random.random((100,100))
         view = self.client[-1]
@@ -317,7 +315,7 @@ class TestView(ClusterTestCase, ParametricTestCase):
         """push/pull pandas.TimeSeries"""
         import pandas
         
-        ts = pandas.TimeSeries(range(10))
+        ts = pandas.TimeSeries(list(range(10)))
         
         view = self.client[-1]
         
@@ -331,9 +329,9 @@ class TestView(ClusterTestCase, ParametricTestCase):
         view = self.client[:]
         def f(x):
             return x**2
-        data = range(16)
+        data = list(range(16))
         r = view.map_sync(f, data)
-        self.assertEqual(r, map(f, data))
+        self.assertEqual(r, list(map(f, data)))
     
     def test_map_iterable(self):
         """test map on iterables (direct)"""
@@ -342,11 +340,23 @@ class TestView(ClusterTestCase, ParametricTestCase):
         arr = range(101)
         # ensure it will be an iterator, even in Python 3
         it = iter(arr)
-        r = view.map_sync(lambda x:x, arr)
+        r = view.map_sync(lambda x: x, it)
         self.assertEqual(r, list(arr))
+
+    @skip_without('numpy')
+    def test_map_numpy(self):
+        """test map on numpy arrays (direct)"""
+        import numpy
+        from numpy.testing.utils import assert_array_equal
+
+        view = self.client[:]
+        # 101 is prime, so it won't be evenly distributed
+        arr = numpy.arange(101)
+        r = view.map_sync(lambda x: x, arr)
+        assert_array_equal(r, arr)
     
     def test_scatter_gather_nonblocking(self):
-        data = range(16)
+        data = list(range(16))
         view = self.client[:]
         view.scatter('a', data, block=False)
         ar = view.gather('a', block=False)
@@ -355,7 +365,7 @@ class TestView(ClusterTestCase, ParametricTestCase):
     @skip_without('numpy')
     def test_scatter_gather_numpy_nonblocking(self):
         import numpy
-        from numpy.testing.utils import assert_array_equal, assert_array_almost_equal
+        from numpy.testing.utils import assert_array_equal
         a = numpy.arange(64)
         view = self.client[:]
         ar = view.scatter('a', a, block=False)
@@ -441,7 +451,7 @@ class TestView(ClusterTestCase, ParametricTestCase):
         
         @interactive
         def check_unicode(a, check):
-            assert isinstance(a, unicode), "%r is not unicode"%a
+            assert not isinstance(a, bytes), "%r is bytes, not unicode"%a
             assert isinstance(check, bytes), "%r is not bytes"%check
             assert a.encode('utf8') == check, "%s != %s"%(a,check)
         
@@ -478,7 +488,7 @@ class TestView(ClusterTestCase, ParametricTestCase):
     
     def test_eval_reference(self):
         v = self.client[self.client.ids[0]]
-        v['g'] = range(5)
+        v['g'] = list(range(5))
         rg = pmod.Reference('g[0]')
         echo = lambda x:x
         self.assertEqual(v.apply_sync(echo, rg), 0)
@@ -491,7 +501,7 @@ class TestView(ClusterTestCase, ParametricTestCase):
 
     def test_single_engine_map(self):
         e0 = self.client[self.client.ids[0]]
-        r = range(5)
+        r = list(range(5))
         check = [ -1*i for i in r ]
         result = e0.map_sync(lambda x: -1*x, r)
         self.assertEqual(result, check)
@@ -499,19 +509,17 @@ class TestView(ClusterTestCase, ParametricTestCase):
     def test_len(self):
         """len(view) makes sense"""
         e0 = self.client[self.client.ids[0]]
-        yield self.assertEqual(len(e0), 1)
+        self.assertEqual(len(e0), 1)
         v = self.client[:]
-        yield self.assertEqual(len(v), len(self.client.ids))
+        self.assertEqual(len(v), len(self.client.ids))
         v = self.client.direct_view('all')
-        yield self.assertEqual(len(v), len(self.client.ids))
+        self.assertEqual(len(v), len(self.client.ids))
         v = self.client[:2]
-        yield self.assertEqual(len(v), 2)
+        self.assertEqual(len(v), 2)
         v = self.client[:1]
-        yield self.assertEqual(len(v), 1)
+        self.assertEqual(len(v), 1)
         v = self.client.load_balanced_view()
-        yield self.assertEqual(len(v), len(self.client.ids))
-        # parametric tests seem to require manual closing?
-        self.client.close()
+        self.assertEqual(len(v), len(self.client.ids))
 
     
     # begin execute tests
@@ -523,6 +531,18 @@ class TestView(ClusterTestCase, ParametricTestCase):
         er = ar.get()
         self.assertEqual(str(er), "<ExecuteReply[%i]: 5>" % er.execution_count)
         self.assertEqual(er.pyout['data']['text/plain'], '5')
+
+    def test_execute_reply_rich(self):
+        e0 = self.client[self.client.ids[0]]
+        e0.block = True
+        e0.execute("from IPython.display import Image, HTML")
+        ar = e0.execute("Image(data=b'garbage', format='png', width=10)", silent=False)
+        er = ar.get()
+        b64data = base64.encodestring(b'garbage').decode('ascii')
+        self.assertEqual(er._repr_png_(), (b64data, dict(width=10)))
+        ar = e0.execute("HTML('<b>bold</b>')", silent=False)
+        er = ar.get()
+        self.assertEqual(er._repr_html_(), "<b>bold</b>")
 
     def test_execute_reply_stdout(self):
         e0 = self.client[self.client.ids[0]]
@@ -571,7 +591,7 @@ class TestView(ClusterTestCase, ParametricTestCase):
         view.execute("from IPython.core.display import *")
         ar = view.execute("[ display(i) for i in range(5) ]", block=True)
         
-        expected = [ {u'text/plain' : unicode(j)} for j in range(5) ]
+        expected = [ {u'text/plain' : unicode_type(j)} for j in range(5) ]
         for outputs in ar.outputs:
             mimes = [ out['data'] for out in outputs ]
             self.assertEqual(mimes, expected)
@@ -587,7 +607,7 @@ class TestView(ClusterTestCase, ParametricTestCase):
         
         ar = view.apply_async(publish)
         ar.get(5)
-        expected = [ {u'text/plain' : unicode(j)} for j in range(5) ]
+        expected = [ {u'text/plain' : unicode_type(j)} for j in range(5) ]
         for outputs in ar.outputs:
             mimes = [ out['data'] for out in outputs ]
             self.assertEqual(mimes, expected)
@@ -786,4 +806,30 @@ class TestView(ClusterTestCase, ParametricTestCase):
         view = self.client[-1]
         tup = view.apply_sync(echoxy, point(1, 2))
         self.assertEqual(tup, (2,1))
+    
+    def test_sync_imports(self):
+        view = self.client[-1]
+        with capture_output() as io:
+            with view.sync_imports():
+                import IPython
+        self.assertIn("IPython", io.stdout)
+        
+        @interactive
+        def find_ipython():
+            return 'IPython' in globals()
+        
+        assert view.apply_sync(find_ipython)
+
+    def test_sync_imports_quiet(self):
+        view = self.client[-1]
+        with capture_output() as io:
+            with view.sync_imports(quiet=True):
+                import IPython
+        self.assertEqual(io.stdout, '')
+        
+        @interactive
+        def find_ipython():
+            return 'IPython' in globals()
+        
+        assert view.apply_sync(find_ipython)
 

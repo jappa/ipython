@@ -4,8 +4,17 @@
 Cython related magics
 =====================
 
+Magic command interface for interactive work with Cython
+
+.. note::
+
+  The ``Cython`` package needs to be installed separately. It
+  can be obtained using ``easy_install`` or ``pip``.
+
 Usage
 =====
+
+To enable the magics below, execute ``%load_ext cythonmagic``.
 
 ``%%cython``
 
@@ -42,6 +51,11 @@ import sys
 import time
 
 try:
+    reload
+except NameError:   # Python 3
+    from imp import reload
+
+try:
     import hashlib
 except ImportError:
     import md5 as hashlib
@@ -52,8 +66,9 @@ from distutils.command.build_ext import build_ext
 from IPython.core import display
 from IPython.core import magic_arguments
 from IPython.core.magic import Magics, magics_class, cell_magic
-from IPython.testing.skipdoctest import skip_doctest
 from IPython.utils import py3compat
+from IPython.utils.path import get_ipython_cache_dir
+from IPython.utils.text import dedent
 
 import Cython
 from Cython.Compiler.Errors import CompileError
@@ -142,6 +157,10 @@ class CythonMagics(Magics):
              "multiple times)."
     )
     @magic_arguments.argument(
+        '-n', '--name',
+        help="Specify a name for the Cython module."
+    )
+    @magic_arguments.argument(
         '-L', dest='library_dirs', metavar='dir', action='append', default=[],
         help="Add a path to the list of libary directories (can be specified "
              "multiple times)."
@@ -187,7 +206,7 @@ class CythonMagics(Magics):
         """
         args = magic_arguments.parse_argstring(self.cython, line)
         code = cell if cell.endswith('\n') else cell+'\n'
-        lib_dir = os.path.join(self.shell.ipython_dir, 'cython')
+        lib_dir = os.path.join(get_ipython_cache_dir(), 'cython')
         quiet = True
         key = code, sys.version_info, sys.executable, Cython.__version__
 
@@ -199,7 +218,10 @@ class CythonMagics(Magics):
             # key which is hashed to determine the module name.
             key += time.time(),
 
-        module_name = "_cython_magic_" + hashlib.md5(str(key).encode('utf-8')).hexdigest()
+        if args.name:
+            module_name = py3compat.unicode_to_str(args.name)
+        else:
+            module_name = "_cython_magic_" + hashlib.md5(str(key).encode('utf-8')).hexdigest()
         module_path = os.path.join(lib_dir, module_name + self.so_ext)
 
         have_module = os.path.isfile(module_path)
@@ -273,7 +295,20 @@ class CythonMagics(Magics):
             self._so_ext = self._get_build_extension().get_ext_filename('')
             return self._so_ext
 
+    def _clear_distutils_mkpath_cache(self):
+        """clear distutils mkpath cache
+        
+        prevents distutils from skipping re-creation of dirs that have been removed
+        """
+        try:
+            from distutils.dir_util import _path_created
+        except ImportError:
+            pass
+        else:
+            _path_created.clear()
+    
     def _get_build_extension(self):
+        self._clear_distutils_mkpath_cache()
         dist = Distribution()
         config_files = dist.find_config_files()
         try:
@@ -297,9 +332,12 @@ class CythonMagics(Magics):
         return html
 
 __doc__ = __doc__.format(
-                CYTHON_DOC = ' '*8 + CythonMagics.cython.__doc__,
-                CYTHON_INLINE_DOC = ' '*8 + CythonMagics.cython_inline.__doc__,
-                CYTHON_PYXIMPORT_DOC = ' '*8 + CythonMagics.cython_pyximport.__doc__,
+                # rST doesn't see the -+ flag as part of an option list, so we
+                # hide it from the module-level docstring.
+                CYTHON_DOC = dedent(CythonMagics.cython.__doc__\
+                            .replace('-+, --cplus','--cplus    ')),
+                CYTHON_INLINE_DOC = dedent(CythonMagics.cython_inline.__doc__),
+                CYTHON_PYXIMPORT_DOC = dedent(CythonMagics.cython_pyximport.__doc__),
 )
 
 def load_ipython_extension(ip):

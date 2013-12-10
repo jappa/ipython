@@ -1,16 +1,16 @@
-import __builtin__
 import sys
 
 from IPython.core.displayhook import DisplayHook
 from IPython.kernel.inprocess.socket import SocketABC
 from IPython.utils.jsonutil import encode_images
+from IPython.utils.py3compat import builtin_mod
 from IPython.utils.traitlets import Instance, Dict
-from session import extract_header, Session
+from .session import extract_header, Session
 
 class ZMQDisplayHook(object):
     """A simple displayhook that publishes the object's repr over a ZeroMQ
     socket."""
-    topic=None
+    topic=b'pyout'
 
     def __init__(self, session, pub_socket):
         self.session = session
@@ -21,7 +21,7 @@ class ZMQDisplayHook(object):
         if obj is None:
             return
 
-        __builtin__._ = obj
+        builtin_mod._ = obj
         sys.stdout.flush()
         sys.stderr.flush()
         msg = self.session.send(self.pub_socket, u'pyout', {u'data':repr(obj)},
@@ -52,8 +52,9 @@ class ZMQShellDisplayHook(DisplayHook):
         """Write the output prompt."""
         self.msg['content']['execution_count'] = self.prompt_count
 
-    def write_format_data(self, format_dict):
+    def write_format_data(self, format_dict, md_dict=None):
         self.msg['content']['data'] = encode_images(format_dict)
+        self.msg['content']['metadata'] = md_dict
 
     def finish_displayhook(self):
         """Finish up all displayhook activities."""

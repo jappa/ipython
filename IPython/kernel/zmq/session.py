@@ -24,10 +24,12 @@ Authors:
 # Imports
 #-----------------------------------------------------------------------------
 
+import hashlib
 import hmac
 import logging
 import os
 import pprint
+import random
 import uuid
 from datetime import datetime
 
@@ -43,13 +45,16 @@ from zmq.utils import jsonapi
 from zmq.eventloop.ioloop import IOLoop
 from zmq.eventloop.zmqstream import ZMQStream
 
-from IPython.config.application import Application, boolean_flag
 from IPython.config.configurable import Configurable, LoggingConfigurable
+from IPython.utils import io
 from IPython.utils.importstring import import_item
 from IPython.utils.jsonutil import extract_dates, squash_dates, date_default
-from IPython.utils.py3compat import str_to_bytes
+from IPython.utils.py3compat import (str_to_bytes, str_to_unicode, unicode_type,
+                                     iteritems)
 from IPython.utils.traitlets import (CBytes, Unicode, Bool, Any, Instance, Set,
-                                        DottedObjectName, CUnicode, Dict, Integer)
+                                        DottedObjectName, CUnicode, Dict, Integer,
+                                        TraitError,
+)
 from IPython.kernel.zmq.serialize import MAX_ITEMS, MAX_BYTES
 
 #-----------------------------------------------------------------------------
@@ -61,12 +66,12 @@ def squash_unicode(obj):
     if isinstance(obj,dict):
         for key in obj.keys():
             obj[key] = squash_unicode(obj[key])
-            if isinstance(key, unicode):
+            if isinstance(key, unicode_type):
                 obj[squash_unicode(key)] = obj.pop(key)
     elif isinstance(obj, list):
         for i,v in enumerate(obj):
             obj[i] = squash_unicode(v)
-    elif isinstance(obj, unicode):
+    elif isinstance(obj, unicode_type):
         obj = obj.encode('utf8')
     return obj
 
@@ -76,9 +81,9 @@ def squash_unicode(obj):
 
 # ISO8601-ify datetime objects
 json_packer = lambda obj: jsonapi.dumps(obj, default=date_default)
-json_unpacker = lambda s: extract_dates(jsonapi.loads(s))
+json_unpacker = lambda s: jsonapi.loads(s)
 
-pickle_packer = lambda o: pickle.dumps(o,-1)
+pickle_packer = lambda o: pickle.dumps(squash_dates(o),-1)
 pickle_unpacker = pickle.loads
 
 default_packer = json_packer
@@ -162,14 +167,14 @@ class Message(object):
 
     def __init__(self, msg_dict):
         dct = self.__dict__
-        for k, v in dict(msg_dict).iteritems():
+        for k, v in iteritems(dict(msg_dict)):
             if isinstance(v, dict):
                 v = Message(v)
             dct[k] = v
 
     # Having this iterator lets dict(msg_obj) work out of the box.
     def __iter__(self):
-        return iter(self.__dict__.iteritems())
+        return iter(iteritems(self.__dict__))
 
     def __repr__(self):
         return repr(self.__dict__)
@@ -284,7 +289,7 @@ class Session(Configurable):
     session = CUnicode(u'', config=True,
         help="""The UUID identifying this session.""")
     def _session_default(self):
-        u = unicode(uuid.uuid4())
+        u = unicode_type(uuid.uuid4())
         self.bsession = u.encode('ascii')
         return u
 
@@ -294,8 +299,9 @@ class Session(Configurable):
     # bsession is the session as bytes
     bsession = CBytes(b'')
 
-    username = Unicode(os.environ.get('USER',u'username'), config=True,
-        help="""Username for the Session. Default is your system username.""")
+    username = Unicode(str_to_unicode(os.environ.get('USER', 'username')),
+        help="""Username for the Session. Default is your system username.""",
+        config=True)
 
     metadata = Dict({}, config=True,
         help="""Metadata dictionary, which serves as the default top-level metadata dict for each message.""")
@@ -306,11 +312,35 @@ class Session(Configurable):
         help="""execution key, for extra authentication.""")
     def _key_changed(self, name, old, new):
         if new:
-            self.auth = hmac.HMAC(new)
+            self.auth = hmac.HMAC(new, digestmod=self.digest_mod)
         else:
             self.auth = None
+    
+    signature_scheme = Unicode('hmac-sha256', config=True,
+        help="""The digest scheme used to construct the message signatures.
+        Must have the form 'hmac-HASH'.""")
+    def _signature_scheme_changed(self, name, old, new):
+        if not new.startswith('hmac-'):
+            raise TraitError("signature_scheme must start with 'hmac-', got %r" % new)
+        hash_name = new.split('-', 1)[1]
+        try:
+            self.digest_mod = getattr(hashlib, hash_name)
+        except AttributeError:
+            raise TraitError("hashlib has no such attribute: %s" % hash_name)
+    
+    digest_mod = Any()
+    def _digest_mod_default(self):
+        return hashlib.sha256
+    
     auth = Instance(hmac.HMAC)
+    
     digest_history = Set()
+    digest_history_size = Integer(2**16, config=True,
+        help="""The maximum number of digests to remember.
+        
+        The digest history will be culled when it exceeds this value.
+        """
+    )
 
     keyfile = Unicode('', config=True,
         help="""path to file containing execution key.""")
@@ -318,6 +348,9 @@ class Session(Configurable):
         with open(new, 'rb') as f:
             self.key = f.read().strip()
 
+    # for protecting against sends from forks
+    pid = Integer()
+    
     # serialization traits:
     
     pack = Any(default_packer) # the actual packer function
@@ -341,6 +374,7 @@ class Session(Configurable):
         Containers larger than this are pickled outright.
         """
     )
+
     
     def __init__(self, **kwargs):
         """create a Session object
@@ -373,6 +407,11 @@ class Session(Configurable):
         key : bytes
             The key used to initialize an HMAC signature.  If unset, messages
             will not be signed or checked.
+        signature_scheme : str
+            The message digest scheme. Currently must be of the form 'hmac-HASH',
+            where 'HASH' is a hashing function available in Python's hashlib.
+            The default is 'hmac-sha256'.
+            This is ignored if 'key' is empty.
         keyfile : filepath
             The file containing a key.  If this is set, `key` will be
             initialized to the contents of the file.
@@ -382,6 +421,7 @@ class Session(Configurable):
         self.none = self.pack({})
         # ensure self._session_default() if necessary, so bsession is defined:
         self.session
+        self.pid = os.getpid()
 
     @property
     def msg_id(self):
@@ -389,7 +429,7 @@ class Session(Configurable):
         return str(uuid.uuid4())
 
     def _check_packers(self):
-        """check packers for binary data and datetime support."""
+        """check packers for datetime support."""
         pack = self.pack
         unpack = self.unpack
 
@@ -397,8 +437,15 @@ class Session(Configurable):
         msg = dict(a=[1,'hi'])
         try:
             packed = pack(msg)
-        except Exception:
-            raise ValueError("packer could not serialize a simple message")
+        except Exception as e:
+            msg = "packer '{packer}' could not serialize a simple message: {e}{jsonmsg}"
+            if self.packer == 'json':
+                jsonmsg = "\nzmq.utils.jsonapi.jsonmod = %s" % jsonapi.jsonmod
+            else:
+                jsonmsg = ""
+            raise ValueError(
+                msg.format(packer=self.packer, e=e, jsonmsg=jsonmsg)
+            )
 
         # ensure packed message is bytes
         if not isinstance(packed, bytes):
@@ -407,16 +454,26 @@ class Session(Configurable):
         # check that unpack is pack's inverse
         try:
             unpacked = unpack(packed)
-        except Exception:
-            raise ValueError("unpacker could not handle the packer's output")
+            assert unpacked == msg
+        except Exception as e:
+            msg = "unpacker '{unpacker}' could not handle output from packer '{packer}': {e}{jsonmsg}"
+            if self.packer == 'json':
+                jsonmsg = "\nzmq.utils.jsonapi.jsonmod = %s" % jsonapi.jsonmod
+            else:
+                jsonmsg = ""
+            raise ValueError(
+                msg.format(packer=self.packer, unpacker=self.unpacker, e=e, jsonmsg=jsonmsg)
+            )
 
         # check datetime support
         msg = dict(t=datetime.now())
         try:
             unpacked = unpack(pack(msg))
+            if isinstance(unpacked['t'], datetime):
+                raise ValueError("Shouldn't deserialize to datetime")
         except Exception:
             self.pack = lambda o: pack(squash_dates(o))
-            self.unpack = lambda s: extract_dates(unpack(s))
+            self.unpack = lambda s: unpack(s)
 
     def msg_header(self, msg_type):
         return msg_header(self.msg_id, msg_type, self.username, self.session)
@@ -470,11 +527,13 @@ class Session(Configurable):
         Returns
         -------
         msg_list : list
-            The list of bytes objects to be sent with the format:
-            [ident1,ident2,...,DELIM,HMAC,p_header,p_parent,p_metadata,p_content,
-             buffer1,buffer2,...]. In this list, the p_* entities are
-            the packed or serialized versions, so if JSON is used, these
-            are utf8 encoded JSON strings.
+            The list of bytes objects to be sent with the format::
+
+                [ident1, ident2, ..., DELIM, HMAC, p_header, p_parent,
+                 p_metadata, p_content, buffer1, buffer2, ...]
+
+            In this list, the ``p_*`` entities are the packed or serialized
+            versions, so if JSON is used, these are utf8 encoded JSON strings.
         """
         content = msg.get('content', {})
         if content is None:
@@ -484,7 +543,7 @@ class Session(Configurable):
         elif isinstance(content, bytes):
             # content is already packed, as in a relayed message
             pass
-        elif isinstance(content, unicode):
+        elif isinstance(content, unicode_type):
             # should be bytes, but JSON often spits out unicode
             content = content.encode('utf8')
         else:
@@ -568,7 +627,10 @@ class Session(Configurable):
         else:
             msg = self.msg(msg_or_type, content=content, parent=parent,
                            header=header, metadata=metadata)
-
+        if not os.getpid() == self.pid:
+            io.rprint("WARNING: attempted to send message from fork")
+            io.rprint(msg)
+            return
         buffers = [] if buffers is None else buffers
         to_send = self.serialize(msg, ident)
         to_send.extend(buffers)
@@ -690,6 +752,30 @@ class Session(Configurable):
             idents, msg_list = msg_list[:idx], msg_list[idx+1:]
             return [m.bytes for m in idents], msg_list
 
+    def _add_digest(self, signature):
+        """add a digest to history to protect against replay attacks"""
+        if self.digest_history_size == 0:
+            # no history, never add digests
+            return
+        
+        self.digest_history.add(signature)
+        if len(self.digest_history) > self.digest_history_size:
+            # threshold reached, cull 10%
+            self._cull_digest_history()
+    
+    def _cull_digest_history(self):
+        """cull the digest history
+        
+        Removes a randomly selected 10% of the digest history
+        """
+        current = len(self.digest_history)
+        n_to_cull = max(int(current // 10), current - self.digest_history_size)
+        if n_to_cull >= current:
+            self.digest_history = set()
+            return
+        to_cull = random.sample(self.digest_history, n_to_cull)
+        self.digest_history.difference_update(to_cull)
+    
     def unserialize(self, msg_list, content=True, copy=True):
         """Unserialize a msg_list to a nested message dict.
 
@@ -697,8 +783,8 @@ class Session(Configurable):
         methods work with full message lists, whereas pack/unpack work with
         the individual message parts in the message list.
 
-        Parameters:
-        -----------
+        Parameters
+        ----------
         msg_list : list of bytes or Message objects
             The list of message parts of the form [HMAC,p_header,p_parent,
             p_metadata,p_content,buffer1,buffer2,...].
@@ -725,18 +811,18 @@ class Session(Configurable):
             if not signature:
                 raise ValueError("Unsigned Message")
             if signature in self.digest_history:
-                raise ValueError("Duplicate Signature: %r"%signature)
-            self.digest_history.add(signature)
+                raise ValueError("Duplicate Signature: %r" % signature)
+            self._add_digest(signature)
             check = self.sign(msg_list[1:5])
             if not signature == check:
                 raise ValueError("Invalid Signature: %r" % signature)
         if not len(msg_list) >= minlen:
             raise TypeError("malformed message, must have at least %i elements"%minlen)
         header = self.unpack(msg_list[1])
-        message['header'] = header
+        message['header'] = extract_dates(header)
         message['msg_id'] = header['msg_id']
         message['msg_type'] = header['msg_type']
-        message['parent_header'] = self.unpack(msg_list[2])
+        message['parent_header'] = extract_dates(self.unpack(msg_list[2]))
         message['metadata'] = self.unpack(msg_list[3])
         if content:
             message['content'] = self.unpack(msg_list[4])

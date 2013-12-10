@@ -31,9 +31,10 @@ from zipimport import zipimporter
 from IPython.core.completer import expand_user, compress_user
 from IPython.core.error import TryNext
 from IPython.utils._process_common import arg_split
+from IPython.utils.py3compat import string_types
 
 # FIXME: this should be pulled in with the right call via the component system
-from IPython.core.ipapi import get as get_ipython
+from IPython import get_ipython
 
 #-----------------------------------------------------------------------------
 # Globals and constants
@@ -53,7 +54,7 @@ import_re = re.compile(r'(?P<name>[a-zA-Z_][a-zA-Z0-9_]*?)'
                        r'|'.join(re.escape(s[0]) for s in imp.get_suffixes()))
 
 # RE for the ipython %run command (python + ipython scripts)
-magic_run_re = re.compile(r'.*(\.ipy|\.py[w]?)$')
+magic_run_re = re.compile(r'.*(\.ipy|\.ipynb|\.py[w]?)$')
 
 #-----------------------------------------------------------------------------
 # Local utilities
@@ -98,39 +99,44 @@ def module_list(path):
             modules.append(m.group('name'))
     return list(set(modules))
 
+
 def get_root_modules():
     """
     Returns a list containing the names of all the modules available in the
     folders of the pythonpath.
+
+    ip.db['rootmodules_cache'] maps sys.path entries to list of modules.
     """
     ip = get_ipython()
-
-    if 'rootmodules' in ip.db:
-        return ip.db['rootmodules']
-
-    t = time()
+    rootmodules_cache = ip.db.get('rootmodules_cache', {})
+    rootmodules = list(sys.builtin_module_names)
+    start_time = time()
     store = False
-    modules = list(sys.builtin_module_names)
     for path in sys.path:
-        modules += module_list(path)
-        if time() - t >= TIMEOUT_STORAGE and not store:
-            store = True
-            print("\nCaching the list of root modules, please wait!")
-            print("(This will only be done once - type '%rehashx' to "
-                  "reset cache!)\n")
-            sys.stdout.flush()
-        if time() - t > TIMEOUT_GIVEUP:
-            print("This is taking too long, we give up.\n")
-            ip.db['rootmodules'] = []
-            return []
-
-    modules = set(modules)
-    if '__init__' in modules:
-        modules.remove('__init__')
-    modules = list(modules)
+        try:
+            modules = rootmodules_cache[path]
+        except KeyError:
+            modules = module_list(path)
+            try:
+                modules.remove('__init__')
+            except ValueError:
+                pass
+            if path not in ('', '.'): # cwd modules should not be cached
+                rootmodules_cache[path] = modules
+            if time() - start_time > TIMEOUT_STORAGE and not store:
+                store = True
+                print("\nCaching the list of root modules, please wait!")
+                print("(This will only be done once - type '%rehashx' to "
+                      "reset cache!)\n")
+                sys.stdout.flush()
+            if time() - start_time > TIMEOUT_GIVEUP:
+                print("This is taking too long, we give up.\n")
+                return []
+        rootmodules.extend(modules)
     if store:
-        ip.db['rootmodules'] = modules
-    return modules
+        ip.db['rootmodules_cache'] = rootmodules_cache
+    rootmodules = list(set(rootmodules))
+    return rootmodules
 
 
 def is_importable(module, attr, only_modules):
@@ -184,7 +190,7 @@ def quick_completer(cmd, completions):
         [d:\ipython]|3> foo ba
     """
 
-    if isinstance(completions, basestring):
+    if isinstance(completions, string_types):
         completions = completions.split()
 
     def do_complete(self, event):
@@ -244,7 +250,7 @@ def module_completer(self,event):
 # completers, that is currently reimplemented in each.
 
 def magic_run_completer(self, event):
-    """Complete files that end in .py or .ipy for the %run command.
+    """Complete files that end in .py or .ipy or .ipynb for the %run command.
     """
     comps = arg_split(event.line, strict=False)
     relpath = (len(comps) > 1 and comps[-1] or '').strip("'\"")
@@ -263,12 +269,12 @@ def magic_run_completer(self, event):
     # should complete on all files, since after the first one other files may
     # be arguments to the input script.
 
-    if filter(magic_run_re.match, comps):
+    if any(magic_run_re.match(c) for c in comps):
         pys =  [f.replace('\\','/') for f in lglob('*')]
     else:
         pys =  [f.replace('\\','/')
                 for f in lglob(relpath+'*.py') + lglob(relpath+'*.ipy') +
-                lglob(relpath + '*.pyw')]
+                lglob(relpath+'*.ipynb') + lglob(relpath + '*.pyw')]
     #print('run comp:', dirs+pys) # dbg
     return [compress_user(p, tilde_expand, tilde_val) for p in dirs+pys]
 
@@ -318,7 +324,7 @@ def cd_completer(self, event):
             return [compress_user(relpath, tilde_expand, tilde_val)]
 
         # if no completions so far, try bookmarks
-        bks = self.db.get('bookmarks',{}).iterkeys()
+        bks = self.db.get('bookmarks',{})
         bkmatches = [s for s in bks if s.startswith(event.symbol)]
         if bkmatches:
             return bkmatches

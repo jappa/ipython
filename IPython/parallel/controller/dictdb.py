@@ -6,37 +6,42 @@ Authors:
 * Min RK
 
 
-TaskRecords are dicts of the form:
-{
-    'msg_id' : str(uuid),
-    'client_uuid' : str(uuid),
-    'engine_uuid' : str(uuid) or None,
-    'header' : dict(header),
-    'content': dict(content),
-    'buffers': list(buffers),
-    'submitted': datetime,
-    'started': datetime or None,
-    'completed': datetime or None,
-    'resubmitted': datetime or None,
-    'result_header' : dict(header) or None,
-    'result_content' : dict(content) or None,
-    'result_buffers' : list(buffers) or None,
-}
-With this info, many of the special categories of tasks can be defined by query:
+TaskRecords are dicts of the form::
 
-pending:  completed is None
-client's outstanding: client_uuid = uuid && completed is None
-MIA: arrived is None (and completed is None)
-etc.
+    {
+        'msg_id' : str(uuid),
+        'client_uuid' : str(uuid),
+        'engine_uuid' : str(uuid) or None,
+        'header' : dict(header),
+        'content': dict(content),
+        'buffers': list(buffers),
+        'submitted': datetime,
+        'started': datetime or None,
+        'completed': datetime or None,
+        'resubmitted': datetime or None,
+        'result_header' : dict(header) or None,
+        'result_content' : dict(content) or None,
+        'result_buffers' : list(buffers) or None,
+    }
 
-EngineRecords are dicts of the form:
-{
-    'eid' : int(id),
-    'uuid': str(uuid)
-}
+With this info, many of the special categories of tasks can be defined by query,
+e.g.:
+
+* pending: completed is None
+* client's outstanding: client_uuid = uuid && completed is None
+* MIA: arrived is None (and completed is None)
+
+EngineRecords are dicts of the form::
+
+    {
+        'eid' : int(id),
+        'uuid': str(uuid)
+    }
+
 This may be extended, but is currently.
 
-We support a subset of mongodb operators:
+We support a subset of mongodb operators::
+
     $lt,$gt,$lte,$gte,$ne,$in,$nin,$all,$mod,$exists
 """
 #-----------------------------------------------------------------------------
@@ -51,6 +56,7 @@ from datetime import datetime
 
 from IPython.config.configurable import LoggingConfigurable
 
+from IPython.utils.py3compat import iteritems, itervalues
 from IPython.utils.traitlets import Dict, Unicode, Integer, Float
 
 filters = {
@@ -74,7 +80,7 @@ class CompositeFilter(object):
     def __init__(self, dikt):
         self.tests = []
         self.values = []
-        for key, value in dikt.iteritems():
+        for key, value in iteritems(dikt):
             self.tests.append(filters[key])
             self.values.append(value)
 
@@ -103,11 +109,12 @@ class DictDB(BaseDB):
     _culled_ids = set() # set of ids which have been culled
     _buffer_bytes = Integer(0) # running total of the bytes in the DB
     
-    size_limit = Integer(1024*1024, config=True,
+    size_limit = Integer(1024**3, config=True,
         help="""The maximum total size (in bytes) of the buffers stored in the db
         
         When the db exceeds this size, the oldest records will be culled until
         the total size is under size_limit * (1-cull_fraction).
+        default: 1 GB
         """
     )
     record_limit = Integer(1024, config=True,
@@ -130,7 +137,7 @@ class DictDB(BaseDB):
 
     def _match_one(self, rec, tests):
         """Check if a specific record matches tests."""
-        for key,test in tests.iteritems():
+        for key,test in iteritems(tests):
             if not test(rec.get(key, None)):
                 return False
         return True
@@ -139,13 +146,13 @@ class DictDB(BaseDB):
         """Find all the matches for a check dict."""
         matches = []
         tests = {}
-        for k,v in check.iteritems():
+        for k,v in iteritems(check):
             if isinstance(v, dict):
                 tests[k] = CompositeFilter(v)
             else:
                 tests[k] = lambda o: o==v
 
-        for rec in self._records.itervalues():
+        for rec in itervalues(self._records):
             if self._match_one(rec, tests):
                 matches.append(copy(rec))
         return matches

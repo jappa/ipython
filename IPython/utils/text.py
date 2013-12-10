@@ -19,8 +19,6 @@ Inheritance diagram:
 # Imports
 #-----------------------------------------------------------------------------
 
-import __main__
-
 import os
 import re
 import sys
@@ -30,7 +28,17 @@ from string import Formatter
 from IPython.external.path import path
 from IPython.testing.skipdoctest import skip_doctest_py3, skip_doctest
 from IPython.utils import py3compat
-from IPython.utils.data import flatten
+
+#-----------------------------------------------------------------------------
+# Declarations
+#-----------------------------------------------------------------------------
+
+# datetime.strftime date format for ipython
+if sys.platform == 'win32':
+    date_format = "%B %d, %Y"
+else:
+    date_format = "%B %-d, %Y"
+
 
 #-----------------------------------------------------------------------------
 # Code
@@ -102,10 +110,10 @@ class SList(list):
 
     These are normal lists, but with the special attributes:
 
-        .l (or .list) : value as list (the list itself).
-        .n (or .nlstr): value as a string, joined on newlines.
-        .s (or .spstr): value as a string, joined on spaces.
-        .p (or .paths): list of path objects
+    * .l (or .list) : value as list (the list itself).
+    * .n (or .nlstr): value as a string, joined on newlines.
+    * .s (or .spstr): value as a string, joined on spaces.
+    * .p (or .paths): list of path objects
 
     Any values which require transformations are computed only once and
     cached."""
@@ -168,7 +176,7 @@ class SList(list):
             except IndexError:
                 return ""
 
-        if isinstance(pattern, basestring):
+        if isinstance(pattern, py3compat.string_types):
             pred = lambda x : re.search(pattern, x, re.IGNORECASE)
         else:
             pred = pattern
@@ -183,13 +191,14 @@ class SList(list):
         Allows quick awk-like usage of string lists.
 
         Example data (in var a, created by 'a = !ls -l')::
+
             -rwxrwxrwx  1 ville None      18 Dec 14  2006 ChangeLog
             drwxrwxrwx+ 6 ville None       0 Oct 24 18:05 IPython
 
-        a.fields(0) is ['-rwxrwxrwx', 'drwxrwxrwx+']
-        a.fields(1,0) is ['1 -rwxrwxrwx', '6 drwxrwxrwx+']
-        (note the joining by space).
-        a.fields(-1) is ['ChangeLog', 'IPython']
+        * ``a.fields(0)`` is ``['-rwxrwxrwx', 'drwxrwxrwx+']``
+        * ``a.fields(1,0)`` is ``['1 -rwxrwxrwx', '6 drwxrwxrwx+']``
+          (note the joining by space).
+        * ``a.fields(-1)`` is ``['ChangeLog', 'IPython']``
 
         IndexErrors are ignored.
 
@@ -312,7 +321,7 @@ def list_strings(arg):
         Out[9]: ['A', 'list', 'of', 'strings']
     """
 
-    if isinstance(arg,basestring): return [arg]
+    if isinstance(arg, py3compat.string_types): return [arg]
     else: return arg
 
 
@@ -606,14 +615,14 @@ class DollarFormatter(FullEvalFormatter):
 
 def _chunks(l, n):
     """Yield successive n-sized chunks from l."""
-    for i in xrange(0, len(l), n):
+    for i in py3compat.xrange(0, len(l), n):
         yield l[i:i+n]
 
 
 def _find_optimal(rlist , separator_size=2 , displaywidth=80):
     """Calculate optimal info to columnize a list of string"""
     for nrow in range(1, len(rlist)+1) :
-        chk = map(max,_chunks(rlist, nrow))
+        chk = list(map(max,_chunks(rlist, nrow)))
         sumlength = sum(chk)
         ncols = len(chk)
         if sumlength+separator_size*(ncols-1) <= displaywidth :
@@ -686,7 +695,7 @@ def compute_item_matrix(items, empty=None, *args, **kwargs) :
         'rows_numbers': 5})
 
     """
-    info = _find_optimal(map(len, items), *args, **kwargs)
+    info = _find_optimal(list(map(len, items)), *args, **kwargs)
     nrow, ncol = info['rows_numbers'], info['columns_numbers']
     return ([[ _get_or_default(items, c*nrow+i, default=empty) for c in range(ncol) ] for i in range(nrow) ], info)
 
@@ -715,3 +724,36 @@ def columnize(items, separator='  ', displaywidth=80):
     fmatrix = [filter(None, x) for x in matrix]
     sjoin = lambda x : separator.join([ y.ljust(w, ' ') for y, w in zip(x, info['columns_width'])])
     return '\n'.join(map(sjoin, fmatrix))+'\n'
+
+
+def get_text_list(list_, last_sep=' and ', sep=", ", wrap_item_with=""):
+    """
+    Return a string with a natural enumeration of items
+
+    >>> get_text_list(['a', 'b', 'c', 'd'])
+    'a, b, c and d'
+    >>> get_text_list(['a', 'b', 'c'], ' or ')
+    'a, b or c'
+    >>> get_text_list(['a', 'b', 'c'], ', ')
+    'a, b, c'
+    >>> get_text_list(['a', 'b'], ' or ')
+    'a or b'
+    >>> get_text_list(['a'])
+    'a'
+    >>> get_text_list([])
+    ''
+    >>> get_text_list(['a', 'b'], wrap_item_with="`")
+    '`a` and `b`'
+    >>> get_text_list(['a', 'b', 'c', 'd'], " = ", sep=" + ")
+    'a + b + c = d'
+    """
+    if len(list_) == 0:
+        return ''
+    if wrap_item_with:
+        list_ = ['%s%s%s' % (wrap_item_with, item, wrap_item_with) for
+                 item in list_]
+    if len(list_) == 1:
+        return list_[0]
+    return '%s%s%s' % (
+        sep.join(i for i in list_[:-1]),
+        last_sep, list_[-1])

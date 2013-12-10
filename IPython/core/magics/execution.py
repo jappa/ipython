@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Implementation of execution-related magic functions.
 """
+from __future__ import print_function
 #-----------------------------------------------------------------------------
 #  Copyright (c) 2012 The IPython Development Team.
 #
@@ -14,13 +15,12 @@
 #-----------------------------------------------------------------------------
 
 # Stdlib
-import __builtin__ as builtin_mod
 import ast
 import bdb
 import os
 import sys
 import time
-from StringIO import StringIO
+from pdb import Restart
 
 # cProfile was added in Python2.5
 try:
@@ -43,6 +43,7 @@ from IPython.core.magic import (Magics, magics_class, line_magic, cell_magic,
                                 line_cell_magic, on_off, needs_local_scope)
 from IPython.testing.skipdoctest import skip_doctest
 from IPython.utils import py3compat
+from IPython.utils.py3compat import builtin_mod, iteritems, PY3
 from IPython.utils.contexts import preserve_keys
 from IPython.utils.io import capture_output
 from IPython.utils.ipstruct import Struct
@@ -51,10 +52,68 @@ from IPython.utils.path import get_py_filename, unquote_filename, shellglob
 from IPython.utils.timing import clock, clock2
 from IPython.utils.warn import warn, error
 
+if PY3:
+    from io import StringIO
+else:
+    from StringIO import StringIO
 
 #-----------------------------------------------------------------------------
 # Magic implementation classes
 #-----------------------------------------------------------------------------
+
+
+class TimeitResult(object):
+    """
+    Object returned by the timeit magic with info about the run.
+
+    Contain the following attributes :
+
+    loops: (int) number of loop done per measurement
+    repeat: (int) number of time the mesurement has been repeated
+    best: (float) best execusion time / number
+    all_runs: (list of float) execusion time of each run (in s)
+    compile_time: (float) time of statement compilation (s)
+
+    """
+
+    def __init__(self, loops, repeat, best, all_runs, compile_time, precision):
+        self.loops = loops
+        self.repeat = repeat
+        self.best = best
+        self.all_runs = all_runs
+        self.compile_time = compile_time
+        self._precision = precision
+
+    def _repr_pretty_(self, p , cycle):
+         unic =  u"%d loops, best of %d: %s per loop" % (self.loops, self.repeat,
+                                            _format_time(self.best, self._precision))
+         p.text(u'<TimeitResult : '+unic+u'>')
+
+
+class TimeitTemplateFiller(ast.NodeTransformer):
+    """Fill in the AST template for timing execution.
+
+    This is quite closely tied to the template definition, which is in
+    :meth:`ExecutionMagics.timeit`.
+    """
+    def __init__(self, ast_setup, ast_stmt):
+        self.ast_setup = ast_setup
+        self.ast_stmt = ast_stmt
+
+    def visit_FunctionDef(self, node):
+        "Fill in the setup statement"
+        self.generic_visit(node)
+        if node.name == "inner":
+            node.body[:1] = self.ast_setup.body
+
+        return node
+
+    def visit_For(self, node):
+        "Fill in the statement to be timed"
+        if getattr(getattr(node.body[0], 'value', None), 'id', None) == 'stmt':
+            node.body = self.ast_stmt.body
+        return node
+
 
 @magics_class
 class ExecutionMagics(Magics):
@@ -77,8 +136,7 @@ python-profiler package from non-free.""")
 
     @skip_doctest
     @line_cell_magic
-    def prun(self, parameter_s='', cell=None, user_mode=True,
-                   opts=None,arg_lst=None,prog_ns=None):
+    def prun(self, parameter_s='', cell=None):
 
         """Run a statement through the python code profiler.
 
@@ -103,113 +161,118 @@ python-profiler package from non-free.""")
 
         Options:
 
-        -l <limit>: you can place restrictions on what or how much of the
-        profile gets printed. The limit value can be:
+        -l <limit>
+          you can place restrictions on what or how much of the
+          profile gets printed. The limit value can be:
 
-          * A string: only information for function names containing this string
-          is printed.
+             * A string: only information for function names containing this string
+               is printed.
 
-          * An integer: only these many lines are printed.
+             * An integer: only these many lines are printed.
 
-          * A float (between 0 and 1): this fraction of the report is printed
-          (for example, use a limit of 0.4 to see the topmost 40% only).
+             * A float (between 0 and 1): this fraction of the report is printed
+               (for example, use a limit of 0.4 to see the topmost 40% only).
 
-        You can combine several limits with repeated use of the option. For
-        example, '-l __init__ -l 5' will print only the topmost 5 lines of
-        information about class constructors.
+          You can combine several limits with repeated use of the option. For
+          example, ``-l __init__ -l 5`` will print only the topmost 5 lines of
+          information about class constructors.
 
-        -r: return the pstats.Stats object generated by the profiling. This
-        object has all the information about the profile in it, and you can
-        later use it for further analysis or in other functions.
+        -r
+          return the pstats.Stats object generated by the profiling. This
+          object has all the information about the profile in it, and you can
+          later use it for further analysis or in other functions.
 
-       -s <key>: sort profile by given key. You can provide more than one key
-        by using the option several times: '-s key1 -s key2 -s key3...'. The
-        default sorting key is 'time'.
+        -s <key>
+          sort profile by given key. You can provide more than one key
+          by using the option several times: '-s key1 -s key2 -s key3...'. The
+          default sorting key is 'time'.
 
-        The following is copied verbatim from the profile documentation
-        referenced below:
+          The following is copied verbatim from the profile documentation
+          referenced below:
 
-        When more than one key is provided, additional keys are used as
-        secondary criteria when the there is equality in all keys selected
-        before them.
+          When more than one key is provided, additional keys are used as
+          secondary criteria when the there is equality in all keys selected
+          before them.
 
-        Abbreviations can be used for any key names, as long as the
-        abbreviation is unambiguous.  The following are the keys currently
-        defined:
+          Abbreviations can be used for any key names, as long as the
+          abbreviation is unambiguous.  The following are the keys currently
+          defined:
 
-                Valid Arg       Meaning
-                  "calls"      call count
-                  "cumulative" cumulative time
-                  "file"       file name
-                  "module"     file name
-                  "pcalls"     primitive call count
-                  "line"       line number
-                  "name"       function name
-                  "nfl"        name/file/line
-                  "stdname"    standard name
-                  "time"       internal time
+          ============  =====================
+          Valid Arg     Meaning
+          ============  =====================
+          "calls"       call count
+          "cumulative"  cumulative time
+          "file"        file name
+          "module"      file name
+          "pcalls"      primitive call count
+          "line"        line number
+          "name"        function name
+          "nfl"         name/file/line
+          "stdname"     standard name
+          "time"        internal time
+          ============  =====================
 
-        Note that all sorts on statistics are in descending order (placing
-        most time consuming items first), where as name, file, and line number
-        searches are in ascending order (i.e., alphabetical). The subtle
-        distinction between "nfl" and "stdname" is that the standard name is a
-        sort of the name as printed, which means that the embedded line
-        numbers get compared in an odd way.  For example, lines 3, 20, and 40
-        would (if the file names were the same) appear in the string order
-        "20" "3" and "40".  In contrast, "nfl" does a numeric compare of the
-        line numbers.  In fact, sort_stats("nfl") is the same as
-        sort_stats("name", "file", "line").
+          Note that all sorts on statistics are in descending order (placing
+          most time consuming items first), where as name, file, and line number
+          searches are in ascending order (i.e., alphabetical). The subtle
+          distinction between "nfl" and "stdname" is that the standard name is a
+          sort of the name as printed, which means that the embedded line
+          numbers get compared in an odd way.  For example, lines 3, 20, and 40
+          would (if the file names were the same) appear in the string order
+          "20" "3" and "40".  In contrast, "nfl" does a numeric compare of the
+          line numbers.  In fact, sort_stats("nfl") is the same as
+          sort_stats("name", "file", "line").
 
-        -T <filename>: save profile results as shown on screen to a text
-        file. The profile is still shown on screen.
+        -T <filename>
+          save profile results as shown on screen to a text
+          file. The profile is still shown on screen.
 
-        -D <filename>: save (via dump_stats) profile statistics to given
-        filename. This data is in a format understood by the pstats module, and
-        is generated by a call to the dump_stats() method of profile
-        objects. The profile is still shown on screen.
+        -D <filename>
+          save (via dump_stats) profile statistics to given
+          filename. This data is in a format understood by the pstats module, and
+          is generated by a call to the dump_stats() method of profile
+          objects. The profile is still shown on screen.
 
-        -q: suppress output to the pager.  Best used with -T and/or -D above.
+        -q
+          suppress output to the pager.  Best used with -T and/or -D above.
 
         If you want to run complete programs under the profiler's control, use
-        '%run -p [prof_opts] filename.py [args to program]' where prof_opts
+        ``%run -p [prof_opts] filename.py [args to program]`` where prof_opts
         contains profiler specific options as described here.
 
         You can read the complete documentation for the profile module with::
 
           In [1]: import profile; profile.help()
         """
+        opts, arg_str = self.parse_options(parameter_s, 'D:l:rs:T:q',
+                                           list_all=True, posix=False)
+        if cell is not None:
+            arg_str += '\n' + cell
+        arg_str = self.shell.input_splitter.transform_cell(arg_str)
+        return self._run_with_profiler(arg_str, opts, self.shell.user_ns)
 
-        opts_def = Struct(D=[''],l=[],s=['time'],T=[''])
+    def _run_with_profiler(self, code, opts, namespace):
+        """
+        Run `code` with profiler.  Used by ``%prun`` and ``%run -p``.
 
-        if user_mode:  # regular user call
-            opts,arg_str = self.parse_options(parameter_s,'D:l:rs:T:q',
-                                              list_all=True, posix=False)
-            namespace = self.shell.user_ns
-            if cell is not None:
-                arg_str += '\n' + cell
-        else:  # called to run a program by %run -p
-            try:
-                filename = get_py_filename(arg_lst[0])
-            except IOError as e:
-                try:
-                    msg = str(e)
-                except UnicodeError:
-                    msg = e.message
-                error(msg)
-                return
+        Parameters
+        ----------
+        code : str
+            Code to be executed.
+        opts : Struct
+            Options parsed by `self.parse_options`.
+        namespace : dict
+            A dictionary for Python namespace (e.g., `self.shell.user_ns`).
 
-            arg_str = 'execfile(filename,prog_ns)'
-            namespace = {
-                'execfile': self.shell.safe_execfile,
-                'prog_ns': prog_ns,
-                'filename': filename
-                }
+        """
 
-        opts.merge(opts_def)
+        # Fill default values for unspecified options:
+        opts.merge(Struct(D=[''], l=[], s=['time'], T=['']))
 
         prof = profile.Profile()
         try:
-            prof = prof.runctx(arg_str,namespace,namespace)
+            prof = prof.runctx(code, namespace, namespace)
             sys_exit = ''
         except SystemExit:
             sys_exit = """*** SystemExit exception caught in code being profiled."""
@@ -242,22 +305,22 @@ python-profiler package from non-free.""")
 
         if 'q' not in opts:
             page.page(output)
-        print sys_exit,
+        print(sys_exit, end=' ')
 
         dump_file = opts.D[0]
         text_file = opts.T[0]
         if dump_file:
             dump_file = unquote_filename(dump_file)
             prof.dump_stats(dump_file)
-            print '\n*** Profile stats marshalled to file',\
-                  repr(dump_file)+'.',sys_exit
+            print('\n*** Profile stats marshalled to file',\
+                  repr(dump_file)+'.',sys_exit)
         if text_file:
             text_file = unquote_filename(text_file)
             pfile = open(text_file,'w')
             pfile.write(output)
             pfile.close()
-            print '\n*** Profile printout saved to text file',\
-                  repr(text_file)+'.',sys_exit
+            print('\n*** Profile printout saved to text file',\
+                  repr(text_file)+'.',sys_exit)
 
         if 'r' in opts:
             return stats
@@ -297,12 +360,33 @@ python-profiler package from non-free.""")
 
         # set on the shell
         self.shell.call_pdb = new_pdb
-        print 'Automatic pdb calling has been turned',on_off(new_pdb)
+        print('Automatic pdb calling has been turned',on_off(new_pdb))
 
-    @line_magic
-    def debug(self, parameter_s=''):
-        """Activate the interactive debugger in post-mortem mode.
+    @skip_doctest
+    @magic_arguments.magic_arguments()
+    @magic_arguments.argument('--breakpoint', '-b', metavar='FILE:LINE',
+        help="""
+        Set break point at LINE in FILE.
+        """
+    )
+    @magic_arguments.argument('statement', nargs='*',
+        help="""
+        Code to run in debugger.
+        You can omit this in cell magic mode.
+        """
+    )
+    @line_cell_magic
+    def debug(self, line='', cell=None):
+        """Activate the interactive debugger.
 
+        This magic command support two ways of activating debugger.
+        One is to activate debugger before executing code.  This way, you
+        can set a break point, to step through the code from the point.
+        You can use this mode by giving statements to execute and optionally
+        a breakpoint.
+
+        The other one is to activate debugger in post-mortem mode.  You can
+        activate this mode simply running %debug without any argument.
         If an exception has just occurred, this lets you inspect its stack
         frames interactively.  Note that this will always work only on the last
         traceback that occurred, so you must call this quickly after an
@@ -312,7 +396,26 @@ python-profiler package from non-free.""")
         If you want IPython to automatically do this on every exception, see
         the %pdb magic for more details.
         """
+        args = magic_arguments.parse_argstring(self.debug, line)
+
+        if not (args.breakpoint or args.statement or cell):
+            self._debug_post_mortem()
+        else:
+            code = "\n".join(args.statement)
+            if cell:
+                code += "\n" + cell
+            self._debug_exec(code, args.breakpoint)
+
+    def _debug_post_mortem(self):
         self.shell.debugger(force=True)
+
+    def _debug_exec(self, code, breakpoint):
+        if breakpoint:
+            (filename, bp_line) = breakpoint.split(':', 1)
+            bp_line = int(bp_line)
+        else:
+            (filename, bp_line) = (None, None)
+        self._run_with_debugger(code, self.shell.user_ns, filename, bp_line)
 
     @line_magic
     def tb(self, s):
@@ -327,21 +430,23 @@ python-profiler package from non-free.""")
                   file_finder=get_py_filename):
         """Run the named file inside IPython as a program.
 
-        Usage:\\
-          %run [-n -i -t [-N<N>] -d [-b<N>] -p [profile options] -G] file [args]
+        Usage::
+        
+          %run [-n -i -e -G]
+               [( -t [-N<N>] | -d [-b<N>] | -p [profile options] )]
+               ( -m mod | file ) [args]
 
         Parameters after the filename are passed as command-line arguments to
         the program (put in sys.argv). Then, control returns to IPython's
         prompt.
 
-        This is similar to running at a system prompt:\\
-          $ python file args\\
+        This is similar to running at a system prompt ``python file args``,
         but with the advantage of giving you IPython's tracebacks, and of
         loading all variables into your interactive namespace for further use
         (unless -p is used, see below).
 
         The file is executed in a namespace initially consisting only of
-        __name__=='__main__' and sys.argv constructed as indicated. It thus
+        ``__name__=='__main__'`` and sys.argv constructed as indicated. It thus
         sees its environment as if it were being run as a stand-alone program
         (except for sharing global objects such as previously imported
         modules). But after execution, the IPython interactive namespace gets
@@ -353,33 +458,37 @@ python-profiler package from non-free.""")
         '*', '?', '[seq]' and '[!seq]' can be used.  Additionally,
         tilde '~' will be expanded into user's home directory.  Unlike
         real shells, quotation does not suppress expansions.  Use
-        *two* back slashes (e.g., '\\\\*') to suppress expansions.
+        *two* back slashes (e.g. ``\\\\*``) to suppress expansions.
         To completely disable these expansions, you can use -G flag.
 
         Options:
 
-        -n: __name__ is NOT set to '__main__', but to the running file's name
-        without extension (as python does under import).  This allows running
-        scripts and reloading the definitions in them without calling code
-        protected by an ' if __name__ == "__main__" ' clause.
+        -n
+          __name__ is NOT set to '__main__', but to the running file's name
+          without extension (as python does under import).  This allows running
+          scripts and reloading the definitions in them without calling code
+          protected by an ``if __name__ == "__main__"`` clause.
 
-        -i: run the file in IPython's namespace instead of an empty one. This
-        is useful if you are experimenting with code written in a text editor
-        which depends on variables defined interactively.
+        -i
+          run the file in IPython's namespace instead of an empty one. This
+          is useful if you are experimenting with code written in a text editor
+          which depends on variables defined interactively.
 
-        -e: ignore sys.exit() calls or SystemExit exceptions in the script
-        being run.  This is particularly useful if IPython is being used to
-        run unittests, which always exit with a sys.exit() call.  In such
-        cases you are interested in the output of the test results, not in
-        seeing a traceback of the unittest module.
+        -e
+          ignore sys.exit() calls or SystemExit exceptions in the script
+          being run.  This is particularly useful if IPython is being used to
+          run unittests, which always exit with a sys.exit() call.  In such
+          cases you are interested in the output of the test results, not in
+          seeing a traceback of the unittest module.
 
-        -t: print timing information at the end of the run.  IPython will give
-        you an estimated CPU time consumption for your script, which under
-        Unix uses the resource module to avoid the wraparound problems of
-        time.clock().  Under Unix, an estimate of time spent on system tasks
-        is also given (for Windows platforms this is reported as 0.0).
+        -t
+          print timing information at the end of the run.  IPython will give
+          you an estimated CPU time consumption for your script, which under
+          Unix uses the resource module to avoid the wraparound problems of
+          time.clock().  Under Unix, an estimate of time spent on system tasks
+          is also given (for Windows platforms this is reported as 0.0).
 
-        If -t is given, an additional -N<N> option can be given, where <N>
+        If -t is given, an additional ``-N<N>`` option can be given, where <N>
         must be an integer indicating how many times you want the script to
         run.  The final timing report will include total and per run results.
 
@@ -387,74 +496,78 @@ python-profiler package from non-free.""")
 
             In [1]: run -t uniq_stable
 
-            IPython CPU timings (estimated):\\
-              User  :    0.19597 s.\\
-              System:        0.0 s.\\
+            IPython CPU timings (estimated):
+              User  :    0.19597 s.
+              System:        0.0 s.
 
             In [2]: run -t -N5 uniq_stable
 
-            IPython CPU timings (estimated):\\
-            Total runs performed: 5\\
-              Times :      Total       Per run\\
-              User  :   0.910862 s,  0.1821724 s.\\
+            IPython CPU timings (estimated):
+            Total runs performed: 5
+              Times :      Total       Per run
+              User  :   0.910862 s,  0.1821724 s.
               System:        0.0 s,        0.0 s.
 
-        -d: run your program under the control of pdb, the Python debugger.
-        This allows you to execute your program step by step, watch variables,
-        etc.  Internally, what IPython does is similar to calling:
+        -d
+          run your program under the control of pdb, the Python debugger.
+          This allows you to execute your program step by step, watch variables,
+          etc.  Internally, what IPython does is similar to calling::
 
-          pdb.run('execfile("YOURFILENAME")')
+              pdb.run('execfile("YOURFILENAME")')
 
-        with a breakpoint set on line 1 of your file.  You can change the line
-        number for this automatic breakpoint to be <N> by using the -bN option
-        (where N must be an integer).  For example::
+          with a breakpoint set on line 1 of your file.  You can change the line
+          number for this automatic breakpoint to be <N> by using the -bN option
+          (where N must be an integer). For example::
 
-          %run -d -b40 myscript
+              %run -d -b40 myscript
 
-        will set the first breakpoint at line 40 in myscript.py.  Note that
-        the first breakpoint must be set on a line which actually does
-        something (not a comment or docstring) for it to stop execution.
+          will set the first breakpoint at line 40 in myscript.py.  Note that
+          the first breakpoint must be set on a line which actually does
+          something (not a comment or docstring) for it to stop execution.
 
-        Or you can specify a breakpoint in a different file::
+          Or you can specify a breakpoint in a different file::
 
-          %run -d -b myotherfile.py:20 myscript
+              %run -d -b myotherfile.py:20 myscript
 
-        When the pdb debugger starts, you will see a (Pdb) prompt.  You must
-        first enter 'c' (without quotes) to start execution up to the first
-        breakpoint.
+          When the pdb debugger starts, you will see a (Pdb) prompt.  You must
+          first enter 'c' (without quotes) to start execution up to the first
+          breakpoint.
 
-        Entering 'help' gives information about the use of the debugger.  You
-        can easily see pdb's full documentation with "import pdb;pdb.help()"
-        at a prompt.
+          Entering 'help' gives information about the use of the debugger.  You
+          can easily see pdb's full documentation with "import pdb;pdb.help()"
+          at a prompt.
 
-        -p: run program under the control of the Python profiler module (which
-        prints a detailed report of execution times, function calls, etc).
+        -p
+          run program under the control of the Python profiler module (which
+          prints a detailed report of execution times, function calls, etc).
 
-        You can pass other options after -p which affect the behavior of the
-        profiler itself. See the docs for %prun for details.
+          You can pass other options after -p which affect the behavior of the
+          profiler itself. See the docs for %prun for details.
 
-        In this mode, the program's variables do NOT propagate back to the
-        IPython interactive namespace (because they remain in the namespace
-        where the profiler executes them).
+          In this mode, the program's variables do NOT propagate back to the
+          IPython interactive namespace (because they remain in the namespace
+          where the profiler executes them).
 
-        Internally this triggers a call to %prun, see its documentation for
-        details on the options available specifically for profiling.
+          Internally this triggers a call to %prun, see its documentation for
+          details on the options available specifically for profiling.
 
         There is one special usage for which the text above doesn't apply:
-        if the filename ends with .ipy, the file is run as ipython script,
+        if the filename ends with .ipy[nb], the file is run as ipython script,
         just as if the commands were written on IPython prompt.
 
-        -m: specify module name to load instead of script path. Similar to
-        the -m option for the python interpreter. Use this option last if you
-        want to combine with other %run options. Unlike the python interpreter
-        only source modules are allowed no .pyc or .pyo files.
-        For example::
+        -m
+          specify module name to load instead of script path. Similar to
+          the -m option for the python interpreter. Use this option last if you
+          want to combine with other %run options. Unlike the python interpreter
+          only source modules are allowed no .pyc or .pyo files.
+          For example::
 
-            %run -m example
+              %run -m example
 
-        will run the example module.
+          will run the example module.
 
-        -G: disable shell-like glob expansion of arguments.
+        -G
+          disable shell-like glob expansion of arguments.
 
         """
 
@@ -473,7 +586,7 @@ python-profiler package from non-free.""")
             filename = file_finder(arg_lst[0])
         except IndexError:
             warn('you must provide at least a filename.')
-            print '\n%run:\n', oinspect.getdoc(self.run)
+            print('\n%run:\n', oinspect.getdoc(self.run))
             return
         except IOError as e:
             try:
@@ -483,7 +596,7 @@ python-profiler package from non-free.""")
             error(msg)
             return
 
-        if filename.lower().endswith('.ipy'):
+        if filename.lower().endswith(('.ipy', '.ipynb')):
             with preserve_keys(self.shell.user_ns, '__file__'):
                 self.shell.user_ns['__file__'] = filename
                 self.shell.safe_execfile_ipy(filename)
@@ -512,7 +625,12 @@ python-profiler package from non-free.""")
             prog_ns = self.shell.user_ns
             __name__save = self.shell.user_ns['__name__']
             prog_ns['__name__'] = '__main__'
-            main_mod = self.shell.new_main_mod(prog_ns)
+            main_mod = self.shell.user_module
+            
+            # Since '%run foo' emulates 'python foo.py' at the cmd line, we must
+            # set the __file__ global in the script's namespace
+            # TK: Is this necessary in interactive mode?
+            prog_ns['__file__'] = filename
         else:
             # Run in a fresh, empty namespace
             if 'n' in opts:
@@ -520,13 +638,11 @@ python-profiler package from non-free.""")
             else:
                 name = '__main__'
 
-            main_mod = self.shell.new_main_mod()
+            # The shell MUST hold a reference to prog_ns so after %run
+            # exits, the python deletion mechanism doesn't zero it out
+            # (leaving dangling references). See interactiveshell for details
+            main_mod = self.shell.new_main_mod(filename, name)
             prog_ns = main_mod.__dict__
-            prog_ns['__name__'] = name
-
-        # Since '%run foo' emulates 'python foo.py' at the cmd line, we must
-        # set the __file__ global in the script's namespace
-        prog_ns['__file__'] = filename
 
         # pickle fix.  See interactiveshell for an explanation.  But we need to
         # make sure that, if we overwrite __main__, we replace it at the end
@@ -541,62 +657,51 @@ python-profiler package from non-free.""")
         # every single object ever created.
         sys.modules[main_mod_name] = main_mod
 
+        if 'p' in opts or 'd' in opts:
+            if 'm' in opts:
+                code = 'run_module(modulename, prog_ns)'
+                code_ns = {
+                    'run_module': self.shell.safe_run_module,
+                    'prog_ns': prog_ns,
+                    'modulename': modulename,
+                }
+            else:
+                if 'd' in opts:
+                    # allow exceptions to raise in debug mode
+                    code = 'execfile(filename, prog_ns, raise_exceptions=True)'
+                else:
+                    code = 'execfile(filename, prog_ns)'
+                code_ns = {
+                    'execfile': self.shell.safe_execfile,
+                    'prog_ns': prog_ns,
+                    'filename': get_py_filename(filename),
+                }
+
         try:
             stats = None
             with self.shell.readline_no_record:
                 if 'p' in opts:
-                    stats = self.prun('', None, False, opts, arg_lst, prog_ns)
+                    stats = self._run_with_profiler(code, opts, code_ns)
                 else:
                     if 'd' in opts:
-                        deb = debugger.Pdb(self.shell.colors)
-                        # reset Breakpoint state, which is moronically kept
-                        # in a class
-                        bdb.Breakpoint.next = 1
-                        bdb.Breakpoint.bplist = {}
-                        bdb.Breakpoint.bpbynumber = [None]
-                        # Set an initial breakpoint to stop execution
-                        maxtries = 10
-                        bp_file, bp_line = parse_breakpoint(opts.get('b', ['1'])[0], filename)
-                        checkline = deb.checkline(bp_file, bp_line)
-                        if not checkline:
-                            for bp in range(bp_line + 1, bp_line + maxtries + 1):
-                                if deb.checkline(bp_file, bp):
-                                    break
-                            else:
-                                msg = ("\nI failed to find a valid line to set "
-                                       "a breakpoint\n"
-                                       "after trying up to line: %s.\n"
-                                       "Please set a valid breakpoint manually "
-                                       "with the -b option." % bp)
-                                error(msg)
-                                return
-                        # if we find a good linenumber, set the breakpoint
-                        deb.do_break('%s:%s' % (bp_file, bp_line))
-
-                        # Mimic Pdb._runscript(...)
-                        deb._wait_for_mainpyfile = True
-                        deb.mainpyfile = deb.canonic(filename)
-
-                        # Start file run
-                        print "NOTE: Enter 'c' at the",
-                        print "%s prompt to start your script." % deb.prompt
-                        ns = {'execfile': py3compat.execfile, 'prog_ns': prog_ns}
-                        try:
-                            #save filename so it can be used by methods on the deb object
-                            deb._exec_filename = filename
-                            deb.run('execfile("%s", prog_ns)' % filename, ns)
-
-                        except:
-                            etype, value, tb = sys.exc_info()
-                            # Skip three frames in the traceback: the %run one,
-                            # one inside bdb.py, and the command-line typed by the
-                            # user (run by exec in pdb itself).
-                            self.shell.InteractiveTB(etype, value, tb, tb_offset=3)
+                        bp_file, bp_line = parse_breakpoint(
+                            opts.get('b', ['1'])[0], filename)
+                        self._run_with_debugger(
+                            code, code_ns, filename, bp_line, bp_file)
                     else:
-                        if runner is None:
-                            runner = self.default_runner
-                        if runner is None:
-                            runner = self.shell.safe_execfile
+                        if 'm' in opts:
+                            def run():
+                                self.shell.safe_run_module(modulename, prog_ns)
+                        else:
+                            if runner is None:
+                                runner = self.default_runner
+                            if runner is None:
+                                runner = self.shell.safe_execfile
+
+                            def run():
+                                runner(filename, prog_ns, prog_ns,
+                                       exit_ignore=exit_ignore)
+
                         if 't' in opts:
                             # timed execution
                             try:
@@ -606,45 +711,14 @@ python-profiler package from non-free.""")
                                     return
                             except (KeyError):
                                 nruns = 1
-                            twall0 = time.time()
-                            if nruns == 1:
-                                t0 = clock2()
-                                runner(filename, prog_ns, prog_ns,
-                                       exit_ignore=exit_ignore)
-                                t1 = clock2()
-                                t_usr = t1[0] - t0[0]
-                                t_sys = t1[1] - t0[1]
-                                print "\nIPython CPU timings (estimated):"
-                                print "  User   : %10.2f s." % t_usr
-                                print "  System : %10.2f s." % t_sys
-                            else:
-                                runs = range(nruns)
-                                t0 = clock2()
-                                for nr in runs:
-                                    runner(filename, prog_ns, prog_ns,
-                                           exit_ignore=exit_ignore)
-                                t1 = clock2()
-                                t_usr = t1[0] - t0[0]
-                                t_sys = t1[1] - t0[1]
-                                print "\nIPython CPU timings (estimated):"
-                                print "Total runs performed:", nruns
-                                print "  Times  : %10s   %10s" % ('Total', 'Per run')
-                                print "  User   : %10.2f s, %10.2f s." % (t_usr, t_usr / nruns)
-                                print "  System : %10.2f s, %10.2f s." % (t_sys, t_sys / nruns)
-                            twall1 = time.time()
-                            print "Wall time: %10.2f s." % (twall1 - twall0)
-
+                            self._run_with_timing(run, nruns)
                         else:
                             # regular execution
-                            runner(filename, prog_ns, prog_ns, exit_ignore=exit_ignore)
+                            run()
 
                 if 'i' in opts:
                     self.shell.user_ns['__name__'] = __name__save
                 else:
-                    # The shell MUST hold a reference to prog_ns so after %run
-                    # exits, the python deletion mechanism doesn't zero it out
-                    # (leaving dangling references).
-                    self.shell.cache_main_mod(prog_ns, filename)
                     # update IPython interactive namespace
 
                     # Some forms of read errors on the file may mean the
@@ -676,16 +750,136 @@ python-profiler package from non-free.""")
                 del sys.modules[main_mod_name]
 
         return stats
-    
+
+    def _run_with_debugger(self, code, code_ns, filename=None,
+                           bp_line=None, bp_file=None):
+        """
+        Run `code` in debugger with a break point.
+
+        Parameters
+        ----------
+        code : str
+            Code to execute.
+        code_ns : dict
+            A namespace in which `code` is executed.
+        filename : str
+            `code` is ran as if it is in `filename`.
+        bp_line : int, optional
+            Line number of the break point.
+        bp_file : str, optional
+            Path to the file in which break point is specified.
+            `filename` is used if not given.
+
+        Raises
+        ------
+        UsageError
+            If the break point given by `bp_line` is not valid.
+
+        """
+        deb = debugger.Pdb(self.shell.colors)
+        # reset Breakpoint state, which is moronically kept
+        # in a class
+        bdb.Breakpoint.next = 1
+        bdb.Breakpoint.bplist = {}
+        bdb.Breakpoint.bpbynumber = [None]
+        if bp_line is not None:
+            # Set an initial breakpoint to stop execution
+            maxtries = 10
+            bp_file = bp_file or filename
+            checkline = deb.checkline(bp_file, bp_line)
+            if not checkline:
+                for bp in range(bp_line + 1, bp_line + maxtries + 1):
+                    if deb.checkline(bp_file, bp):
+                        break
+                else:
+                    msg = ("\nI failed to find a valid line to set "
+                           "a breakpoint\n"
+                           "after trying up to line: %s.\n"
+                           "Please set a valid breakpoint manually "
+                           "with the -b option." % bp)
+                    raise UsageError(msg)
+            # if we find a good linenumber, set the breakpoint
+            deb.do_break('%s:%s' % (bp_file, bp_line))
+
+        if filename:
+            # Mimic Pdb._runscript(...)
+            deb._wait_for_mainpyfile = True
+            deb.mainpyfile = deb.canonic(filename)
+
+        # Start file run
+        print("NOTE: Enter 'c' at the %s prompt to continue execution." % deb.prompt)
+        try:
+            if filename:
+                # save filename so it can be used by methods on the deb object
+                deb._exec_filename = filename
+            while True:
+                try:
+                    deb.run(code, code_ns)
+                except Restart:
+                    print("Restarting")
+                    if filename:
+                        deb._wait_for_mainpyfile = True
+                        deb.mainpyfile = deb.canonic(filename)
+                    continue
+                else:
+                    break
+            
+
+        except:
+            etype, value, tb = sys.exc_info()
+            # Skip three frames in the traceback: the %run one,
+            # one inside bdb.py, and the command-line typed by the
+            # user (run by exec in pdb itself).
+            self.shell.InteractiveTB(etype, value, tb, tb_offset=3)
+
+    @staticmethod
+    def _run_with_timing(run, nruns):
+        """
+        Run function `run` and print timing information.
+
+        Parameters
+        ----------
+        run : callable
+            Any callable object which takes no argument.
+        nruns : int
+            Number of times to execute `run`.
+
+        """
+        twall0 = time.time()
+        if nruns == 1:
+            t0 = clock2()
+            run()
+            t1 = clock2()
+            t_usr = t1[0] - t0[0]
+            t_sys = t1[1] - t0[1]
+            print("\nIPython CPU timings (estimated):")
+            print("  User   : %10.2f s." % t_usr)
+            print("  System : %10.2f s." % t_sys)
+        else:
+            runs = range(nruns)
+            t0 = clock2()
+            for nr in runs:
+                run()
+            t1 = clock2()
+            t_usr = t1[0] - t0[0]
+            t_sys = t1[1] - t0[1]
+            print("\nIPython CPU timings (estimated):")
+            print("Total runs performed:", nruns)
+            print("  Times  : %10s   %10s" % ('Total', 'Per run'))
+            print("  User   : %10.2f s, %10.2f s." % (t_usr, t_usr / nruns))
+            print("  System : %10.2f s, %10.2f s." % (t_sys, t_sys / nruns))
+        twall1 = time.time()
+        print("Wall time: %10.2f s." % (twall1 - twall0))
+
     @skip_doctest
     @line_cell_magic
     def timeit(self, line='', cell=None):
         """Time execution of a Python statement or expression
 
         Usage, in line mode:
-          %timeit [-n<N> -r<R> [-t|-c]] statement
+          %timeit [-n<N> -r<R> [-t|-c] -q -p<P> -o] statement
         or in cell mode:
-          %%timeit [-n<N> -r<R> [-t|-c]] setup_code
+          %%timeit [-n<N> -r<R> [-t|-c] -q -p<P> -o] setup_code
           code
           code...
 
@@ -715,6 +909,11 @@ python-profiler package from non-free.""")
 
         -p<P>: use a precision of <P> digits to display the timing result.
         Default: 3
+
+        -q: Quiet, do not print result.
+
+        -o: return a TimeitResult that can be stored in a variable to inspect
+            the result in more details.
 
 
         Examples
@@ -748,7 +947,7 @@ python-profiler package from non-free.""")
 
         import timeit
 
-        opts, stmt = self.parse_options(line,'n:r:tcp:',
+        opts, stmt = self.parse_options(line,'n:r:tcp:qo',
                                         posix=False, strict=False)
         if stmt == "" and cell is None:
             return
@@ -757,6 +956,8 @@ python-profiler package from non-free.""")
         number = int(getattr(opts, "n", 0))
         repeat = int(getattr(opts, "r", timeit.default_repeat))
         precision = int(getattr(opts, "p", 3))
+        quiet = 'q' in opts
+        return_result = 'o' in opts
         if hasattr(opts, "t"):
             timefunc = time.time
         if hasattr(opts, "c"):
@@ -790,23 +991,7 @@ python-profiler package from non-free.""")
                                         '    _t1 = _timer()\n'
                                         '    return _t1 - _t0\n')
 
-        class TimeitTemplateFiller(ast.NodeTransformer):
-            "This is quite tightly tied to the template definition above."
-            def visit_FunctionDef(self, node):
-                "Fill in the setup statement"
-                self.generic_visit(node)
-                if node.name == "inner":
-                    node.body[:1] = ast_setup.body
-
-                return node
-
-            def visit_For(self, node):
-                "Fill in the statement to be timed"
-                if getattr(getattr(node.body[0], 'value', None), 'id', None) == 'stmt':
-                    node.body = ast_stmt.body
-                return node
-
-        timeit_ast = TimeitTemplateFiller().visit(timeit_ast_template)
+        timeit_ast = TimeitTemplateFiller(ast_setup, ast_stmt).visit(timeit_ast_template)
         timeit_ast = ast.fix_missing_locations(timeit_ast)
 
         # Track compilation time so it can be reported if too long
@@ -818,23 +1003,25 @@ python-profiler package from non-free.""")
         tc = clock()-t0
 
         ns = {}
-        exec code in self.shell.user_ns, ns
+        exec(code, self.shell.user_ns, ns)
         timer.inner = ns["inner"]
 
         if number == 0:
             # determine number so that 0.2 <= total time < 2.0
             number = 1
-            for i in range(1, 10):
+            for _ in range(1, 10):
                 if timer.timeit(number) >= 0.2:
                     break
                 number *= 10
-
-        best = min(timer.repeat(repeat, number)) / number
-
-        print u"%d loops, best of %d: %s per loop" % (number, repeat,
-                                                          _format_time(best, precision))
-        if tc > tc_min:
-            print "Compiler time: %.2f s" % tc
+        all_runs = timer.repeat(repeat, number)
+        best = min(all_runs) / number
+        if not quiet :
+            print(u"%d loops, best of %d: %s per loop" % (number, repeat,
+                                                              _format_time(best, precision)))
+            if tc > tc_min:
+                print("Compiler time: %.2f s" % tc)
+        if return_result:
+            return TimeitResult(number, repeat, best, all_runs, tc, precision)
 
     @skip_doctest
     @needs_local_scope
@@ -900,9 +1087,9 @@ python-profiler package from non-free.""")
             raise UsageError("Can't use statement directly after '%%time'!")
         
         if cell:
-            expr = self.shell.prefilter(cell,False)
+            expr = self.shell.input_transformer_manager.transform_cell(cell)
         else:
-            expr = self.shell.prefilter(line,False)
+            expr = self.shell.input_transformer_manager.transform_cell(line)
 
         # Minimum time above which parse time will be reported
         tp_min = 0.1
@@ -939,7 +1126,7 @@ python-profiler package from non-free.""")
             end = clock2()
         else:
             st = clock2()
-            exec code in glob, local_ns
+            exec(code, glob, local_ns)
             end = clock2()
             out = None
         wall_end = wtime()
@@ -948,13 +1135,15 @@ python-profiler package from non-free.""")
         cpu_user = end[0]-st[0]
         cpu_sys = end[1]-st[1]
         cpu_tot = cpu_user+cpu_sys
-        print "CPU times: user %s, sys: %s, total: %s" % \
-              (_format_time(cpu_user),_format_time(cpu_sys),_format_time(cpu_tot))
-        print "Wall time: %s" % _format_time(wall_time)
+        # On windows cpu_sys is always zero, so no new information to the next print 
+        if sys.platform != 'win32':
+            print("CPU times: user %s, sys: %s, total: %s" % \
+                (_format_time(cpu_user),_format_time(cpu_sys),_format_time(cpu_tot)))
+        print("Wall time: %s" % _format_time(wall_time))
         if tc > tc_min:
-            print "Compiler : %s" % _format_time(tc)
+            print("Compiler : %s" % _format_time(tc))
         if tp > tp_min:
-            print "Parser   : %s" % _format_time(tp)
+            print("Parser   : %s" % _format_time(tp))
         return out
 
     @skip_doctest
@@ -970,8 +1159,13 @@ python-profiler package from non-free.""")
 
           -r: use 'raw' input.  By default, the 'processed' history is used,
           so that magics are loaded in their transformed version to valid
-          Python.  If this option is given, the raw input as typed as the
+          Python.  If this option is given, the raw input as typed at the
           command line is used instead.
+          
+          -q: quiet macro definition.  By default, a tag line is printed 
+          to indicate the macro has been created, and then the contents of 
+          the macro are printed.  If this option is given, then no printout
+          is produced once the macro is created.
 
         This will define a global variable called `name` which is a string
         made of joining the slices and lines you specify (n1,n2,... numbers
@@ -985,7 +1179,7 @@ python-profiler package from non-free.""")
         Note: as a 'hidden' feature, you can also use traditional python slice
         notation, where N:M means numbers N through M-1.
 
-        For example, if your history contains (%hist prints it)::
+        For example, if your history contains (print using %hist -n )::
 
           44: x=1
           45: y=3
@@ -1015,9 +1209,9 @@ python-profiler package from non-free.""")
           print macro_name
 
         """
-        opts,args = self.parse_options(parameter_s,'r',mode='list')
+        opts,args = self.parse_options(parameter_s,'rq',mode='list')
         if not args:   # List existing macros
-            return sorted(k for k,v in self.shell.user_ns.iteritems() if\
+            return sorted(k for k,v in iteritems(self.shell.user_ns) if\
                                                         isinstance(v, Macro))
         if len(args) == 1:
             raise UsageError(
@@ -1028,13 +1222,14 @@ python-profiler package from non-free.""")
         try:
             lines = self.shell.find_user_code(codefrom, 'r' in opts)
         except (ValueError, TypeError) as e:
-            print e.args[0]
+            print(e.args[0])
             return
         macro = Macro(lines)
         self.shell.define_macro(name, macro)
-        print 'Macro `%s` created. To execute, type its name (without quotes).' % name
-        print '=== Macro contents: ==='
-        print macro,
+        if not ( 'q' in opts) : 
+            print('Macro `%s` created. To execute, type its name (without quotes).' % name)
+            print('=== Macro contents: ===')
+            print(macro, end=' ')
 
     @magic_arguments.magic_arguments()
     @magic_arguments.argument('output', type=str, default='', nargs='?',
@@ -1055,13 +1250,17 @@ python-profiler package from non-free.""")
     @magic_arguments.argument('--no-stdout', action="store_true",
         help="""Don't capture stdout."""
     )
+    @magic_arguments.argument('--no-display', action="store_true",
+        help="""Don't capture IPython's rich display."""
+    )
     @cell_magic
     def capture(self, line, cell):
-        """run the cell, capturing stdout/err"""
+        """run the cell, capturing stdout, stderr, and IPython's rich display() calls."""
         args = magic_arguments.parse_argstring(self.capture, line)
         out = not args.no_stdout
         err = not args.no_stderr
-        with capture_output(out, err) as io:
+        disp = not args.no_display
+        with capture_output(out, err, disp) as io:
             self.shell.run_cell(cell)
         if args.output:
             self.shell.user_ns[args.output] = io
@@ -1112,5 +1311,4 @@ def _format_time(timespan, precision=3):
         order = min(-int(math.floor(math.log10(timespan)) // 3), 3)
     else:
         order = 3
-    ret =  u"%.*g %s" % (precision, timespan * scaling[order], units[order])
-    return ret
+    return u"%.*g %s" % (precision, timespan * scaling[order], units[order])

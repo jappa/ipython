@@ -4,6 +4,7 @@ Authors:
 
 * Min RK
 """
+from __future__ import print_function
 #-----------------------------------------------------------------------------
 #  Copyright (C) 2010-2011  The IPython Development Team
 #
@@ -24,6 +25,7 @@ from types import ModuleType
 import zmq
 
 from IPython.testing.skipdoctest import skip_doctest
+from IPython.utils import pickleutil
 from IPython.utils.traitlets import (
     HasTraits, Any, Bool, List, Dict, Set, Instance, CFloat, Integer
 )
@@ -31,6 +33,7 @@ from IPython.external.decorator import decorator
 
 from IPython.parallel import util
 from IPython.parallel.controller.dependency import Dependency, dependent
+from IPython.utils.py3compat import string_types, iteritems, PY3
 
 from . import map as Map
 from .asyncresult import AsyncResult, AsyncMapResult
@@ -50,16 +53,20 @@ def save_ids(f, self, *args, **kwargs):
         nmsgs = len(self.client.history) - n_previous
         msg_ids = self.client.history[-nmsgs:]
         self.history.extend(msg_ids)
-        map(self.outstanding.add, msg_ids)
+        self.outstanding.update(msg_ids)
     return ret
 
 @decorator
 def sync_results(f, self, *args, **kwargs):
     """sync relevant results from self.client to our results attribute."""
-    ret = f(self, *args, **kwargs)
-    delta = self.outstanding.difference(self.client.outstanding)
-    completed = self.outstanding.intersection(delta)
-    self.outstanding = self.outstanding.difference(completed)
+    if self._in_sync_results:
+        return f(self, *args, **kwargs)
+    self._in_sync_results = True
+    try:
+        ret = f(self, *args, **kwargs)
+    finally:
+        self._in_sync_results = False
+        self._sync_results()
     return ret
 
 @decorator
@@ -115,6 +122,7 @@ class View(HasTraits):
 
     _socket = Instance('zmq.Socket')
     _flag_names = List(['targets', 'block', 'track'])
+    _in_sync_results = Bool(False)
     _targets = Any()
     _idents = Any()
 
@@ -157,7 +165,7 @@ class View(HasTraits):
             safely edit after arrays and buffers during non-copying
             sends.
         """
-        for name, value in kwargs.iteritems():
+        for name, value in iteritems(kwargs):
             if name not in self._flag_names:
                 raise KeyError("Invalid name: %r"%name)
             else:
@@ -198,6 +206,15 @@ class View(HasTraits):
     # apply
     #----------------------------------------------------------------
 
+    def _sync_results(self):
+        """to be called by @sync_results decorator
+        
+        after submitting any tasks.
+        """
+        delta = self.outstanding.difference(self.client.outstanding)
+        completed = self.outstanding.intersection(delta)
+        self.outstanding = self.outstanding.difference(completed)
+        
     @sync_results
     @save_ids
     def _really_apply(self, f, args, kwargs, block=None, **options):
@@ -205,30 +222,27 @@ class View(HasTraits):
         raise NotImplementedError("Implement in subclasses")
 
     def apply(self, f, *args, **kwargs):
-        """calls f(*args, **kwargs) on remote engines, returning the result.
+        """calls ``f(*args, **kwargs)`` on remote engines, returning the result.
 
         This method sets all apply flags via this View's attributes.
 
-        if self.block is False:
-            returns AsyncResult
-        else:
-            returns actual result of f(*args, **kwargs)
+        Returns :class:`~IPython.parallel.client.asyncresult.AsyncResult`
+        instance if ``self.block`` is False, otherwise the return value of
+        ``f(*args, **kwargs)``.
         """
         return self._really_apply(f, args, kwargs)
 
     def apply_async(self, f, *args, **kwargs):
-        """calls f(*args, **kwargs) on remote engines in a nonblocking manner.
+        """calls ``f(*args, **kwargs)`` on remote engines in a nonblocking manner.
 
-        returns AsyncResult
+        Returns :class:`~IPython.parallel.client.asyncresult.AsyncResult` instance.
         """
         return self._really_apply(f, args, kwargs, block=False)
 
     @spin_after
     def apply_sync(self, f, *args, **kwargs):
-        """calls f(*args, **kwargs) on remote engines in a blocking manner,
+        """calls ``f(*args, **kwargs)`` on remote engines in a blocking manner,
          returning the result.
-
-        returns: actual result of f(*args, **kwargs)
         """
         return self._really_apply(f, args, kwargs, block=True)
 
@@ -304,8 +318,7 @@ class View(HasTraits):
     def get_result(self, indices_or_msg_ids=None):
         """return one or more results, specified by history index or msg_id.
 
-        See client.get_result for details.
-
+        See :meth:`IPython.parallel.client.client.Client.get_result` for details.
         """
 
         if indices_or_msg_ids is None:
@@ -323,14 +336,15 @@ class View(HasTraits):
     # Map
     #-------------------------------------------------------------------
 
+    @sync_results
     def map(self, f, *sequences, **kwargs):
         """override in subclasses"""
         raise NotImplementedError
 
     def map_async(self, f, *sequences, **kwargs):
-        """Parallel version of builtin `map`, using this view's engines.
+        """Parallel version of builtin :func:`python:map`, using this view's engines.
 
-        This is equivalent to map(...block=False)
+        This is equivalent to ``map(...block=False)``.
 
         See `self.map` for details.
         """
@@ -340,9 +354,9 @@ class View(HasTraits):
         return self.map(f,*sequences,**kwargs)
 
     def map_sync(self, f, *sequences, **kwargs):
-        """Parallel version of builtin `map`, using this view's engines.
+        """Parallel version of builtin :func:`python:map`, using this view's engines.
 
-        This is equivalent to map(...block=True)
+        This is equivalent to ``map(...block=True)``.
 
         See `self.map` for details.
         """
@@ -352,7 +366,7 @@ class View(HasTraits):
         return self.map(f,*sequences,**kwargs)
 
     def imap(self, f, *sequences, **kwargs):
-        """Parallel version of `itertools.imap`.
+        """Parallel version of :func:`itertools.imap`.
 
         See `self.map` for details.
 
@@ -364,7 +378,7 @@ class View(HasTraits):
     # Decorators
     #-------------------------------------------------------------------
 
-    def remote(self, block=True, **flags):
+    def remote(self, block=None, **flags):
         """Decorator for making a RemoteFunction"""
         block = self.block if block is None else block
         return remote(self, block=block, **flags)
@@ -424,8 +438,8 @@ class DirectView(View):
         importing recarray from numpy on engine(s)
 
         """
-        import __builtin__
-        local_import = __builtin__.__import__
+        from IPython.utils.py3compat import builtin_mod
+        local_import = builtin_mod.__import__
         modules = set()
         results = []
         @util.interactive
@@ -442,13 +456,13 @@ class DirectView(View):
             else:
                 user_ns[name] = sys.modules[name]
 
-        def view_import(name, globals={}, locals={}, fromlist=[], level=-1):
+        def view_import(name, globals={}, locals={}, fromlist=[], level=0):
             """the drop-in replacement for __import__, that optionally imports
             locally as well.
             """
             # don't override nested imports
-            save_import = __builtin__.__import__
-            __builtin__.__import__ = local_import
+            save_import = builtin_mod.__import__
+            builtin_mod.__import__ = local_import
 
             if imp.lock_held():
                 # this is a side-effect import, don't do it remotely, or even
@@ -463,21 +477,21 @@ class DirectView(View):
             imp.release_lock()
 
             key = name+':'+','.join(fromlist or [])
-            if level == -1 and key not in modules:
+            if level <= 0 and key not in modules:
                 modules.add(key)
                 if not quiet:
                     if fromlist:
-                        print "importing %s from %s on engine(s)"%(','.join(fromlist), name)
+                        print("importing %s from %s on engine(s)"%(','.join(fromlist), name))
                     else:
-                        print "importing %s on engine(s)"%name
+                        print("importing %s on engine(s)"%name)
                 results.append(self.apply_async(remote_import, name, fromlist, level))
             # restore override
-            __builtin__.__import__ = save_import
+            builtin_mod.__import__ = save_import
 
             return mod
 
         # override __import__
-        __builtin__.__import__ = view_import
+        builtin_mod.__import__ = view_import
         try:
             # enter the block
             yield
@@ -489,11 +503,21 @@ class DirectView(View):
                 pass
         finally:
             # always restore __import__
-            __builtin__.__import__ = local_import
+            builtin_mod.__import__ = local_import
 
         for r in results:
             # raise possible remote ImportErrors here
             r.get()
+    
+    def use_dill(self):
+        """Expand serialization support with dill
+        
+        adds support for closures, etc.
+        
+        This calls IPython.utils.pickleutil.use_dill() here and on each engine.
+        """
+        pickleutil.use_dill()
+        return self.apply(pickleutil.use_dill)
 
 
     @sync_results
@@ -534,8 +558,8 @@ class DirectView(View):
         block = self.block if block is None else block
         track = self.track if track is None else track
         targets = self.targets if targets is None else targets
-
-        _idents = self.client._build_targets(targets)[0]
+        
+        _idents, _targets = self.client._build_targets(targets)
         msg_ids = []
         trackers = []
         for ident in _idents:
@@ -544,8 +568,10 @@ class DirectView(View):
             if track:
                 trackers.append(msg['tracker'])
             msg_ids.append(msg['header']['msg_id'])
+        if isinstance(targets, int):
+            msg_ids = msg_ids[0]
         tracker = None if track is False else zmq.MessageTracker(*trackers)
-        ar = AsyncResult(self.client, msg_ids, fname=getname(f), targets=targets, tracker=tracker)
+        ar = AsyncResult(self.client, msg_ids, fname=getname(f), targets=_targets, tracker=tracker)
         if block:
             try:
                 return ar.get()
@@ -554,9 +580,9 @@ class DirectView(View):
         return ar
 
 
-    @spin_after
+    @sync_results
     def map(self, f, *sequences, **kwargs):
-        """view.map(f, *sequences, block=self.block) => list|AsyncMapResult
+        """``view.map(f, *sequences, block=self.block)`` => list|AsyncMapResult
 
         Parallel version of builtin `map`, using this View's `targets`.
 
@@ -578,14 +604,14 @@ class DirectView(View):
         Returns
         -------
 
-        if block=False:
-            AsyncMapResult
-                An object like AsyncResult, but which reassembles the sequence of results
-                into a single list. AsyncMapResults can be iterated through before all
-                results are complete.
-        else:
-            list
-                the result of map(f,*sequences)
+
+        If block=False
+          An :class:`~IPython.parallel.client.asyncresult.AsyncMapResult` instance.
+          An object like AsyncResult, but which reassembles the sequence of results
+          into a single list. AsyncMapResults can be iterated through before all
+          results are complete.
+        else
+            A list, the result of ``map(f,*sequences)``
         """
 
         block = kwargs.pop('block', self.block)
@@ -616,13 +642,15 @@ class DirectView(View):
         block = self.block if block is None else block
         targets = self.targets if targets is None else targets
 
-        _idents = self.client._build_targets(targets)[0]
+        _idents, _targets = self.client._build_targets(targets)
         msg_ids = []
         trackers = []
         for ident in _idents:
             msg = self.client.send_execute_request(self._socket, code, silent=silent, ident=ident)
             msg_ids.append(msg['header']['msg_id'])
-        ar = AsyncResult(self.client, msg_ids, fname='execute', targets=targets)
+        if isinstance(targets, int):
+            msg_ids = msg_ids[0]
+        ar = AsyncResult(self.client, msg_ids, fname='execute', targets=_targets)
         if block:
             try:
                 ar.get()
@@ -699,11 +727,11 @@ class DirectView(View):
         block = block if block is not None else self.block
         targets = targets if targets is not None else self.targets
         applier = self.apply_sync if block else self.apply_async
-        if isinstance(names, basestring):
+        if isinstance(names, string_types):
             pass
         elif isinstance(names, (list,tuple,set)):
             for key in names:
-                if not isinstance(key, basestring):
+                if not isinstance(key, string_types):
                     raise TypeError("keys must be str, not type %r"%type(key))
         else:
             raise TypeError("names must be strs, not %r"%names)
@@ -778,7 +806,7 @@ class DirectView(View):
     def __setitem__(self,key, value):
         self.update({key:value})
 
-    def clear(self, targets=None, block=False):
+    def clear(self, targets=None, block=None):
         """Clear the remote namespaces on my engines."""
         block = block if block is not None else self.block
         targets = targets if targets is not None else self.targets
@@ -811,7 +839,7 @@ class DirectView(View):
             # This is injected into __builtins__.
             ip = get_ipython()
         except NameError:
-            print "The IPython parallel magics (%px, etc.) only work within IPython."
+            print("The IPython parallel magics (%px, etc.) only work within IPython.")
             return
         
         M = ParallelMagics(ip, self, suffix)
@@ -851,11 +879,11 @@ class LoadBalancedView(View):
 
         For use in `set_flags`.
         """
-        if dep is None or isinstance(dep, (basestring, AsyncResult, Dependency)):
+        if dep is None or isinstance(dep, string_types + (AsyncResult, Dependency)):
             return True
         elif isinstance(dep, (list,set, tuple)):
             for d in dep:
-                if not isinstance(d, (basestring, AsyncResult)):
+                if not isinstance(d, string_types + (AsyncResult,)):
                     return False
         elif isinstance(dep, dict):
             if set(dep.keys()) != set(Dependency().as_dict().keys()):
@@ -863,7 +891,7 @@ class LoadBalancedView(View):
             if not isinstance(dep['msg_ids'], list):
                 return False
             for d in dep['msg_ids']:
-                if not isinstance(d, basestring):
+                if not isinstance(d, string_types):
                     return False
         else:
             return False
@@ -931,8 +959,9 @@ class LoadBalancedView(View):
                     raise ValueError("Invalid dependency: %r"%value)
         if 'timeout' in kwargs:
             t = kwargs['timeout']
-            if not isinstance(t, (int, long, float, type(None))):
-                raise TypeError("Invalid type for timeout: %r"%type(t))
+            if not isinstance(t, (int, float, type(None))):
+                if (not PY3) and (not isinstance(t, long)):
+                    raise TypeError("Invalid type for timeout: %r"%type(t))
             if t is not None:
                 if t < 0:
                     raise ValueError("Invalid timeout: %s"%t)
@@ -1031,10 +1060,10 @@ class LoadBalancedView(View):
                 pass
         return ar
 
-    @spin_after
+    @sync_results
     @save_ids
     def map(self, f, *sequences, **kwargs):
-        """view.map(f, *sequences, block=self.block, chunksize=1, ordered=True) => list|AsyncMapResult
+        """``view.map(f, *sequences, block=self.block, chunksize=1, ordered=True)`` => list|AsyncMapResult
 
         Parallel version of builtin `map`, load-balanced by this View.
 
@@ -1069,14 +1098,13 @@ class LoadBalancedView(View):
         Returns
         -------
 
-        if block=False:
-            AsyncMapResult
-                An object like AsyncResult, but which reassembles the sequence of results
-                into a single list. AsyncMapResults can be iterated through before all
-                results are complete.
-            else:
-                the result of map(f,*sequences)
-
+        if block=False
+          An :class:`~IPython.parallel.client.asyncresult.AsyncMapResult` instance.
+          An object like AsyncResult, but which reassembles the sequence of results
+          into a single list. AsyncMapResults can be iterated through before all
+          results are complete.
+        else
+            A list, the result of ``map(f,*sequences)``
         """
 
         # default

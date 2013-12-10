@@ -30,6 +30,7 @@ import threading
 from IPython.config.configurable import Configurable
 from IPython.external.decorator import decorator
 from IPython.utils.path import locate_profile
+from IPython.utils import py3compat
 from IPython.utils.traitlets import (
     Any, Bool, Dict, Instance, Integer, List, Unicode, TraitError,
 )
@@ -148,7 +149,7 @@ class HistoryAccessor(Configurable):
                     (self.__class__.__name__, new)
             raise TraitError(msg)
     
-    def __init__(self, profile='default', hist_file=u'', config=None, **traits):
+    def __init__(self, profile='default', hist_file=u'', **traits):
         """Create a new history accessor.
         
         Parameters
@@ -162,7 +163,7 @@ class HistoryAccessor(Configurable):
           Config object. hist_file can also be set through this.
         """
         # We need a pointer back to the shell for various tasks.
-        super(HistoryAccessor, self).__init__(config=config, **traits)
+        super(HistoryAccessor, self).__init__(**traits)
         # defer setting hist_file from kwarg until after init,
         # otherwise the default kwarg value would clobber any value
         # set by config
@@ -423,7 +424,7 @@ class HistoryManager(HistoryAccessor):
     dir_hist = List()
     def _dir_hist_default(self):
         try:
-            return [os.getcwdu()]
+            return [py3compat.getcwd()]
         except OSError:
             return []
 
@@ -519,7 +520,7 @@ class HistoryManager(HistoryAccessor):
         optionally open a new session."""
         self.output_hist.clear()
         # The directory history can't be completely empty
-        self.dir_hist[:] = [os.getcwdu()]
+        self.dir_hist[:] = [py3compat.getcwd()]
         
         if new_session:
             if self.session_number:
@@ -634,8 +635,9 @@ class HistoryManager(HistoryAccessor):
                    '_ii': self._ii,
                    '_iii': self._iii,
                    new_i : self._i00 }
-
-        self.shell.push(to_main, interactive=False)
+        
+        if self.shell is not None:
+            self.shell.push(to_main, interactive=False)
 
     def store_output(self, line_num):
         """If database output logging is enabled, this saves all the
@@ -712,7 +714,7 @@ class HistorySavingThread(threading.Thread):
     stop_now = False
     enabled = True
     def __init__(self, history_manager):
-        super(HistorySavingThread, self).__init__()
+        super(HistorySavingThread, self).__init__(name="IPythonHistorySavingThread")
         self.history_manager = history_manager
         self.enabled = history_manager.enabled
         atexit.register(self.stop)

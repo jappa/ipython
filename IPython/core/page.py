@@ -34,7 +34,7 @@ import tempfile
 
 from io import UnsupportedOperation
 
-from IPython.core import ipapi
+from IPython import get_ipython
 from IPython.core.error import TryNext
 from IPython.utils.data import chop
 from IPython.utils import io
@@ -158,7 +158,7 @@ def page(strng, start=0, screen_lines=0, pager_cmd=None):
     start = max(0, start)
 
     # first, try the hook
-    ip = ipapi.get()
+    ip = get_ipython()
     if ip:
         try:
             ip.hooks.show_in_pager(strng)
@@ -305,7 +305,7 @@ if os.name == 'nt' and os.environ.get('TERM','dumb') != 'emacs':
         @return:    True if need print more lines, False if quit
         """
         io.stdout.write('---Return to continue, q to quit--- ')
-        ans = msvcrt.getch()
+        ans = msvcrt.getwch()
         if ans in ("q", "Q"):
             result = False
         else:
@@ -314,7 +314,7 @@ if os.name == 'nt' and os.environ.get('TERM','dumb') != 'emacs':
         return result
 else:
     def page_more():
-        ans = raw_input('---Return to continue, q to quit--- ')
+        ans = py3compat.input('---Return to continue, q to quit--- ')
         if ans.lower().startswith('q'):
             return False
         else:
@@ -325,9 +325,11 @@ def snip_print(str,width = 75,print_full = 0,header = ''):
     """Print a string snipping the midsection to fit in width.
 
     print_full: mode control:
+    
       - 0: only snip long strings
       - 1: send to page() directly.
       - 2: snip long strings and ask for full length viewing with page()
+    
     Return 1 if snipping was necessary, 0 otherwise."""
 
     if print_full == 1:
@@ -343,6 +345,6 @@ def snip_print(str,width = 75,print_full = 0,header = ''):
         print(str[:whalf] + ' <...> ' + str[-whalf:])
         snip = 1
     if snip and print_full == 2:
-        if raw_input(header+' Snipped. View (y/n)? [N]').lower() == 'y':
+        if py3compat.input(header+' Snipped. View (y/n)? [N]').lower() == 'y':
             page(str)
     return snip

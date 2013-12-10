@@ -39,6 +39,16 @@ import sys
 from IPython.external import pexpect
 from IPython.utils import py3compat
 
+# We want to use native strings on both versions of Python, and with two
+# different versions of pexpect.
+if py3compat.PY3:
+    try:
+        spawn = pexpect.spawnu   # Pexpect 3.0 +
+    except AttributeError:
+        spawn = pexpect.spawn    # pexpect-u fork
+else:
+    spawn = pexpect.spawn
+
 # Global usage strings, to avoid indentation issues when typing it below.
 USAGE = """
 Interactive script runner, type: %s
@@ -93,9 +103,9 @@ class InteractiveRunner(object):
           - program: command to execute the given program.
 
           - prompts: a list of patterns to match as valid prompts, in the
-          format used by pexpect.  This basically means that it can be either
-          a string (to be compiled as a regular expression) or a list of such
-          (it must be a true list, as pexpect does type checks).
+            format used by pexpect.  This basically means that it can be either
+            a string (to be compiled as a regular expression) or a list of such
+            (it must be a true list, as pexpect does type checks).
 
           If more than one prompt is given, the first is treated as the main
           program prompt and the others as 'continuation' prompts, like
@@ -107,19 +117,19 @@ class InteractiveRunner(object):
         Optional inputs:
 
           - args(None): optional list of strings to pass as arguments to the
-          child program.
+            child program.
 
           - out(sys.stdout): if given, an output stream to be used when writing
-          output.  The only requirement is that it must have a .write() method.
+            output.  The only requirement is that it must have a .write() method.
 
         Public members not parameterized in the constructor:
 
           - delaybeforesend(0): Newer versions of pexpect have a delay before
-          sending each new input.  For our purposes here, it's typically best
-          to just set this to zero, but if you encounter reliability problems
-          or want an interactive run to pause briefly at each prompt, just
-          increase this value (it is measured in seconds).  Note that this
-          variable is not honored at all by older versions of pexpect.
+            sending each new input.  For our purposes here, it's typically best
+            to just set this to zero, but if you encounter reliability problems
+            or want an interactive run to pause briefly at each prompt, just
+            increase this value (it is measured in seconds).  Note that this
+            variable is not honored at all by older versions of pexpect.
         """
 
         self.program = program
@@ -134,7 +144,7 @@ class InteractiveRunner(object):
 
         # Create child process and hold on to it so we don't have to re-create
         # for every single execution call
-        c = self.child = pexpect.spawn(self.program,self.args,timeout=None)
+        c = self.child = spawn(self.program,self.args,timeout=None)
         c.delaybeforesend = self.delaybeforesend
         # pexpect hard-codes the terminal size as (24,80) (rows,columns).
         # This causes problems because any line longer than 80 characters gets
@@ -154,7 +164,7 @@ class InteractiveRunner(object):
 
         Inputs:
 
-          -fname: name of the file to execute.
+          - fname: name of the file to execute.
 
         See the run_source docstring for the meaning of the optional
         arguments."""
@@ -173,15 +183,15 @@ class InteractiveRunner(object):
         Inputs:
 
           - source: a string of code to be executed, or an open file object we
-          can iterate over.
+            can iterate over.
 
         Optional inputs:
 
           - interact(False): if true, start to interact with the running
-          program at the end of the script.  Otherwise, just exit.
+            program at the end of the script.  Otherwise, just exit.
 
           - get_output(False): if true, capture the output of the child process
-          (filtering the input commands out) and return it as a string.
+            (filtering the input commands out) and return it as a string.
 
         Returns:
           A string containing the process output, but only if requested.
@@ -189,7 +199,7 @@ class InteractiveRunner(object):
 
         # if the source is a string, chop it up in lines so we can iterate
         # over it just as if it were an open file.
-        if isinstance(source, basestring):
+        if isinstance(source, py3compat.string_types):
             source = source.splitlines(True)
 
         if self.echo:
@@ -287,7 +297,6 @@ class InteractiveRunner(object):
 
         self.run_file(args[0],opts.interact)
 
-_ipython_cmd = "ipython3" if py3compat.PY3 else "ipython"
 
 # Specific runners for particular programs
 class IPythonRunner(InteractiveRunner):
@@ -303,15 +312,20 @@ class IPythonRunner(InteractiveRunner):
     prompts would break this.
     """
 
-    def __init__(self,program = _ipython_cmd, args=None, out=sys.stdout, echo=True):
+    def __init__(self, program='<ipython>', args=None, out=sys.stdout, echo=True):
         """New runner, optionally passing the ipython command to use."""
         args0 = ['--colors=NoColor',
                  '--no-term-title',
                  '--no-autoindent',
                  # '--quick' is important, to prevent loading default config:
                  '--quick']
-        if args is None: args = args0
-        else: args = args0 + args
+        args = args0 + (args or [])
+
+        # Special case to launch IPython with current interpreter
+        if program == '<ipython>':
+            program = sys.executable
+            args = ['-m', 'IPython'] + args
+
         prompts = [r'In \[\d+\]: ',r'   \.*: ']
         InteractiveRunner.__init__(self,program,prompts,args,out,echo)
 
